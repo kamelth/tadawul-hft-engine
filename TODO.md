@@ -1,0 +1,473 @@
+# HFT Tadawul Engine - Implementation Tracker
+
+**Student:** Kamel Gerado | **Advisor:** Dr. Mohammed Elrabaa | **Start:** Feb 2, 2026
+
+---
+
+## 🏗️ System Architecture Summary
+
+### Core Components (What Each Does)
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    TRADING ENGINE PIPELINE                      │
+└────────────────────────────────────────────────────────────────┘
+
+1. ITCH Handler (Data Input Layer)
+   ├─ Reads NASDAQ ITCH binary files (market data feed)
+   ├─ Parses messages (Add Order, Execute, Cancel, Delete)
+   ├─ Converts big-endian binary → structured data
+   └─ Feeds messages to Market Manager
+
+2. Market Manager (Multi-Symbol Router)
+   ├─ Manages multiple symbols (AAPL, MSFT, AMZN, etc.)
+   ├─ Routes orders to correct symbol's order book
+   ├─ Generates unique order IDs
+   └─ Aggregates market statistics
+
+3. Order Book (Single-Symbol Matching Engine)
+   ├─ Maintains price levels (bids & asks) for ONE symbol
+   ├─ Uses AVL tree for sorted price levels
+   ├─ Tracks best bid/ask in real-time
+   ├─ Performs order matching (when buy meets sell)
+   └─ Provides market depth (top N levels)
+
+4. Strategy (Trading Decision Maker) - YOU BUILD THIS
+   ├─ Monitors order book updates
+   ├─ Implements market-making logic (2-sided quoting)
+   ├─ Manages inventory (position tracking)
+   ├─ Enforces risk limits (max position size)
+   └─ Generates buy/sell orders
+
+5. Execution Simulator (Order Fill Simulator) - YOU BUILD THIS
+   ├─ Holds strategy's pending orders
+   ├─ Matches strategy orders against market flow
+   ├─ Simulates realistic fills (price-time priority)
+   └─ Notifies strategy when orders fill
+
+6. Performance Monitor - YOU BUILD THIS
+   ├─ Timestamps all operations (ITCH → book → strategy → order)
+   ├─ Calculates latency (p50, p95, p99)
+   ├─ Measures throughput (messages/sec, orders/sec)
+   └─ Generates performance reports
+
+7. Market Impact Analyzer - YOU BUILD THIS
+   ├─ Runs baseline (no HFT) to measure market quality
+   ├─ Runs with HFT strategy active
+   ├─ Compares metrics (spread, volume, depth)
+   └─ Proves strategy improves market efficiency
+```
+
+### Data Flow
+
+```
+ITCH File (01302020.NASDAQ_ITCH50.gz)
+    ↓
+[1] ITCHHandler::ProcessMessage()
+    - Parse binary message
+    - Extract: order_id, symbol, side, price, quantity
+    ↓
+[2] MarketManager::AddOrder("AAPL", Buy, price, qty)
+    - Lookup symbol → order book
+    - Generate unique order ID
+    ↓
+[3] OrderBook::AddOrder(order)
+    - Insert into price level (AVL tree)
+    - Update best bid/ask
+    - Update market depth
+    ↓
+[4] Strategy::OnOrderBookUpdate("AAPL", book)
+    - Read best_bid, best_ask
+    - Calculate mid_price = (bid + ask) / 2
+    - Generate quotes: bid @ mid - spread, ask @ mid + spread
+    - Submit orders
+    ↓
+[5] ExecutionSimulator::CheckFills()
+    - If market crosses our price → FILL
+    - Update position
+    - Calculate PnL
+    ↓
+[6] PerformanceMonitor::RecordMetrics()
+    - Log latencies
+    - Log throughput
+    ↓
+[7] Results: Charts, Reports, Defense Materials
+```
+
+---
+
+## 🎯 Deterministic Design Principles
+
+**Goal:** Given same ITCH input → Always produce same output (reproducible results)
+
+### Design Rules:
+1. **Time Source:** Use ITCH message timestamps ONLY (not system clock)
+2. **Order Matching:** Strict price-time priority (no randomness)
+3. **Order IDs:** Deterministic generation (sequential counter, not random)
+4. **Strategy Logic:** No random elements (fixed spread, deterministic inventory skew)
+5. **Execution:** Deterministic fill simulation (no probabilistic fills)
+6. **Iteration Order:** Sorted containers (AVL tree, ordered maps) not unordered
+7. **Floating Point:** Avoid where possible; use integer arithmetic (prices in cents)
+
+### Benefits:
+- ✅ Unit tests with known outputs
+- ✅ Reproducible benchmarks
+- ✅ Debugging: same input → same bug
+- ✅ Defense: re-run demo shows identical results
+
+---
+
+## 📊 Overall Progress
+
+| Phase | Status | Progress | Target |
+|-------|--------|----------|--------|
+| **0. Setup** | 🟢 Complete | 4/4 | 1 day |
+| **1. Core Utils** | 🟢 Complete | 5/5 | 3 days |
+| **2. Order Book** | 🔴 Not Started | 0/6 | 5 days |
+| **3. ITCH Parser** | 🔴 Not Started | 0/5 | 4 days |
+| **4. Strategy** | 🔴 Not Started | 0/6 | 4 days |
+| **5. Performance** | 🔴 Not Started | 0/5 | 3 days |
+| **6. Market Impact** | 🔴 Not Started | 0/5 | 3 days |
+| **7. CUDA (Optional)** | 🔴 Not Started | 0/8 | 5 days |
+| **8. Defense** | 🔴 Not Started | 0/5 | 4 days |
+| **TOTAL** | 🟡 In Progress | **9/49 (18%)** | **~7 weeks** |
+
+**Legend:** 🔴 Not Started | 🟡 In Progress | 🟢 Complete
+
+---
+
+## Phase 0: Project Setup
+
+**Goal:** Build system working | **Target:** 1 day
+
+- [x] Create directory structure (include/, source/, modules/core/, tests/, data/, results/, scripts/)
+- [x] Initialize git with `.gitignore` (build/, *.o, *.so, .DS_Store, IDE files)
+- [x] Create root `CMakeLists.txt` (C++17, subdirectories, deterministic flags: -O3, -march=native)
+- [x] Verify build: `mkdir build && cd build && cmake .. && make`
+
+**Status:** 🟢 4/4 COMPLETE
+
+---
+
+## Phase 1: Core Utilities
+
+**Goal:** Containers and time utils (deterministic) | **Target:** 3 days
+
+- [x] `core/timestamp.h` - Timestamp from ITCH messages (NOT system clock), comparisons, conversions
+- [x] `core/list.h` - Intrusive doubly-linked list (deterministic insertion order)
+- [x] `core/bintree_avl.h` - AVL tree (deterministic sorted order), insert, remove, find, rotations
+- [x] `core/endian.h` - Byte swap (uint16/32/64, big-endian ↔ host)
+- [x] Unit tests pass (`./tests/test_core`) - verify deterministic behavior (24/24 tests passed!)
+
+**Status:** 🟢 5/5 COMPLETE
+
+**Completed Files:**
+- `modules/core/include/core/timestamp.h` - Full ITCH timestamp support with nanosecond precision
+- `modules/core/include/core/endian.h` - Byte swapping with 48-bit support for ITCH
+- `modules/core/include/core/containers/list.h` - Intrusive list with full iterator support
+- `modules/core/include/core/containers/bintree_avl.h` - Self-balancing AVL tree
+- `tests/test_core.cpp` - Comprehensive test suite (all 24 tests passing)
+
+---
+
+## Phase 2: Order Book Engine
+
+**Goal:** Deterministic multi-symbol order matching | **Target:** 5 days
+
+- [ ] `trader/matching/order.h` - Order struct (ID, symbol, side, price, qty, state, ITCH timestamp)
+- [ ] `trader/matching/symbol.h` - Symbol registry (deterministic ID assignment, ordered map)
+- [ ] `trader/matching/level.h` - Price level (price, volume, order list with FIFO)
+- [ ] `trader/matching/order_book.h` - Order book (add, execute, cancel, strict price-time priority)
+- [ ] `trader/matching/market_manager.h` - Multi-symbol routing (deterministic order ID generation)
+- [ ] Tests pass, performance >100K orders/sec, deterministic output (`./tests/test_order_book`)
+
+**Deterministic Requirements:**
+- Order ID: Sequential counter (not random, not timestamp-based)
+- Price levels: AVL tree (sorted)
+- Order matching: Strict price-time priority (FIFO within level)
+
+**Status:** 🔴 0/6
+
+---
+
+## Phase 3: ITCH Data Pipeline
+
+**Goal:** Deterministic ITCH message streaming | **Target:** 4 days
+
+- [ ] `trader/providers/nasdaq/itch_messages.h` - Message structs (S, R, A, E, X, D), packed, big-endian
+- [ ] `trader/providers/nasdaq/itch_reader.cpp` - Read gzipped ITCH file sequentially
+- [ ] `trader/providers/nasdaq/itch_handler.h` - Parse, dispatch, route to MarketManager (use ITCH timestamps)
+- [ ] End-to-end pipeline: `./hft_engine data/01302020.NASDAQ_ITCH50.gz` (deterministic logs)
+- [ ] Symbol filter (5-10 liquid stocks: AAPL, MSFT, AMZN, GOOGL, TSLA)
+
+**Deterministic Requirements:**
+- Process messages in file order (sequential)
+- Use ITCH message timestamp as event time (not wall clock)
+- Deterministic symbol selection (alphabetical or by stock locate)
+
+**Status:** 🔴 0/5
+
+---
+
+## Phase 4: Market-Making Strategy
+
+**Goal:** Deterministic 2-sided quoting with PnL | **Target:** 4 days
+
+- [ ] `trader/strategy/strategy_base.h` - Interface (OnOrderBookUpdate, OnTrade, OnOrderFilled)
+- [ ] `trader/strategy/position.h` - Deterministic inventory tracker (position, limits, mark-to-market)
+- [ ] `trader/strategy/market_maker.h` - Deterministic quoting (fixed spread, deterministic inventory skew)
+- [ ] `trader/strategy/execution_simulator.cpp` - Deterministic fill simulation (strict price-time matching)
+- [ ] `trader/strategy/pnl.h` - Realized & unrealized PnL (integer arithmetic, avoid floating point errors)
+- [ ] Strategy runs: `./hft_engine --strategy market_maker data/...` (reproducible quotes, fills, PnL)
+
+**Deterministic Requirements:**
+- No random elements in strategy logic
+- Fixed spread (e.g., 1 tick)
+- Deterministic inventory skew formula (if position > X, adjust by Y ticks)
+- Integer arithmetic for prices (cents, not dollars)
+- Execution simulator: deterministic fill logic (if market crosses, fill immediately)
+
+**Status:** 🔴 0/6
+
+---
+
+## Phase 5: Performance Metrics
+
+**Goal:** Latency & throughput measurement | **Target:** 3 days
+
+- [ ] Timestamp all operations using ITCH timestamps (ITCH receive, book update, strategy decision, order submit)
+- [ ] Calculate latency (p50, p95, p99, p99.9) - `source/trader/performance/metrics.cpp`
+- [ ] Calculate throughput (messages/sec, orders/sec, quotes/sec)
+- [ ] Visualization script - `scripts/plot_performance.py` (latency histogram, throughput chart)
+- [ ] Performance report - `results/performance_report.txt` (latency, throughput numbers)
+
+**Deterministic Requirements:**
+- Latency = ITCH timestamp deltas (not wall clock)
+- Reproducible metrics from same ITCH file
+
+**Status:** 🔴 0/5
+
+---
+
+## Phase 6: Market Impact Analysis
+
+**Goal:** Prove spread reduction (deterministic comparison) | **Target:** 3 days
+
+- [ ] Baseline run (no strategy) - Measure spread, volume, depth every N messages (deterministic sampling)
+- [ ] HFT run (with strategy) - Measure same metrics (deterministic)
+- [ ] Analysis script - `scripts/analyze_impact.py` (calculate % improvements, deterministic)
+- [ ] Visualization - `scripts/plot_impact.py` (spread, volume, depth charts)
+- [ ] Impact report - `results/market_impact_report.txt` (before/after comparison, reproducible)
+
+**Deterministic Requirements:**
+- Sample metrics at fixed ITCH message intervals (not time-based)
+- Use same ITCH file for baseline and HFT runs
+- Reproducible analysis (same input → same charts)
+
+**Status:** 🔴 0/5
+
+---
+
+## Phase 7: CUDA GPU Acceleration (Optional)
+
+**Goal:** Accelerate multi-symbol processing with GPU | **Target:** 5 days
+
+**Prerequisites:** Phases 0-6 complete, CPU baseline established
+
+**CUDA Strategy: Parallel Multi-Symbol Order Book Updates**
+
+### 7.1 CUDA Environment Setup
+- [ ] Install CUDA Toolkit (11.8+)
+- [ ] Update CMakeLists.txt: `find_package(CUDA)`, set nvcc flags (`-arch=sm_75`, `-O3`)
+- [ ] Create `modules/cuda/` directory structure
+- [ ] Verify GPU: `nvidia-smi`, create simple test kernel (vector addition)
+
+### 7.2 Thrust Library Integration
+- [ ] `cuda/order_book_gpu.h` - GPU order book using `thrust::device_vector`
+- [ ] Use `thrust::sort` for price level sorting (replaces AVL tree on GPU)
+- [ ] Use `thrust::reduce` for volume aggregation across levels
+- [ ] Use `thrust::transform` for parallel best bid/ask calculation across symbols
+- [ ] Benchmark: Thrust operations vs CPU AVL tree
+
+### 7.3 Minimize Data Transfer (Critical for Performance)
+- [ ] Implement batching: Accumulate N ITCH messages on CPU, transfer batch to GPU
+- [ ] Use pinned memory (`cudaHostAlloc`) for host-side buffers (faster PCIe transfer)
+- [ ] Transfer only changed data (delta updates, not full order books)
+- [ ] Measure transfer overhead: `cudaEventRecord` for PCIe time
+- [ ] Target: Transfer time < 10% of total latency
+
+### 7.4 Leverage Shared Memory
+- [ ] Custom kernel: `__global__ void UpdateOrderBooks(...)` - one thread block per symbol
+- [ ] Load hot data into `__shared__` memory (best bid/ask, top 5 levels)
+- [ ] Reduce global memory accesses (use shared memory for intermediate calculations)
+- [ ] Benchmark: Shared memory vs global memory bandwidth
+
+### 7.5 Optimize Occupancy
+- [ ] Profile kernel with `nvprof` or Nsight Compute (check occupancy %)
+- [ ] Tune thread block size (128, 256, 512 threads) for max occupancy
+- [ ] Reduce register usage (use `__launch_bounds__` if needed)
+- [ ] Balance: threads/block vs shared memory usage
+- [ ] Target: >75% occupancy
+
+### 7.6 Kernel Fusion
+- [ ] Fuse multiple operations into single kernel: `UpdateOrderBook + CalculateMetrics + GenerateQuotes`
+- [ ] Avoid intermediate data transfers (keep data on GPU between operations)
+- [ ] Example: `__global__ void UpdateAndQuote(...)` combines book update + strategy decision
+- [ ] Measure: Single fused kernel vs multiple kernel launches
+
+### 7.7 Asynchronous Operations (CUDA Streams)
+- [ ] Create multiple CUDA streams (e.g., 4 streams for different symbol groups)
+- [ ] Overlap: CPU preprocessing (stream 1) + GPU compute (stream 2) + CPU postprocessing (stream 3)
+- [ ] Use `cudaMemcpyAsync` for non-blocking transfers
+- [ ] Synchronize only when needed (`cudaStreamSynchronize`)
+- [ ] Measure: Async throughput vs synchronous
+
+### 7.8 GPU Performance Validation
+- [ ] Ensure deterministic GPU output (same input → same output, verify against CPU)
+- [ ] Measure GPU speedup: `(CPU time) / (GPU time + transfer time)`
+- [ ] Test scalability: 1, 10, 50, 100 symbols
+- [ ] Generate report: `results/gpu_performance_report.txt` (speedup, occupancy, transfer overhead)
+
+**Target Metrics:**
+- 2-5x speedup for 50+ symbols (realistic goal)
+- Transfer overhead < 10% of total time
+- Occupancy > 75%
+- Deterministic output (matches CPU baseline exactly)
+
+**Status:** 🔴 0/8
+
+---
+
+## Phase 8: Documentation & Defense
+
+**Goal:** Defense-ready materials | **Target:** 4 days
+
+- [ ] Code documentation (README, build instructions, architecture diagram, deterministic design doc)
+- [ ] Defense slides (20-25 slides: intro, design, deterministic approach, results, Q&A prep)
+- [ ] Live demo script (show streaming, order book, strategy, deterministic re-run, charts)
+- [ ] Backup video (5-7 min demo recording, show deterministic behavior)
+- [ ] Practice presentation (20-25 min, emphasize determinism, Q&A prep)
+
+**Key Defense Points:**
+- Deterministic design ensures reproducibility
+- Same ITCH input always produces same output (demo this!)
+- GPU acceleration (if implemented): show speedup charts
+- Market impact: show spread reduction proof
+
+**Status:** 🔴 0/5
+
+---
+
+## Quick Reference
+
+### Directory Structure
+```
+tadawul-hft-engine/
+├── modules/
+│   ├── core/include/core/          # timestamp.h, list.h, bintree_avl.h, endian.h
+│   └── cuda/include/cuda/          # order_book_gpu.h, kernels.cuh (if Phase 7)
+├── include/trader/
+│   ├── matching/                   # order.h, symbol.h, level.h, order_book.h, market_manager.h
+│   ├── providers/nasdaq/           # itch_messages.h, itch_reader.h, itch_handler.h
+│   └── strategy/                   # strategy_base.h, position.h, market_maker.h, pnl.h
+├── source/trader/                  # implementations
+├── tests/                          # test_core.cpp, test_order_book.cpp, test_deterministic.cpp
+├── scripts/                        # plot_performance.py, plot_impact.py, analyze_impact.py
+├── data/                           # 01302020.NASDAQ_ITCH50.gz
+└── results/                        # performance_report.txt, *.png
+```
+
+### Weekly Plan
+- **Week 1:** Phase 0-1 (Setup + Core)
+- **Week 2:** Phase 2 (Order Book)
+- **Week 3:** Phase 3 (ITCH Parser)
+- **Week 4:** Phase 4 (Strategy)
+- **Week 5:** Phase 5-6 (Metrics + Impact)
+- **Week 6:** Phase 7 (CUDA - optional)
+- **Week 7:** Phase 8 (Defense)
+
+### Success Criteria (Must Have)
+✅ Deterministic engine (reproducible results)
+✅ Working executable (not just simulation)
+✅ Live-like streaming (continuous updates)
+✅ Simple market maker (clear, deterministic rules)
+✅ Performance charts (latency, throughput)
+✅ Market impact proof (spread reduction)
+
+### Optional (If Time Permits)
+🎯 CUDA GPU acceleration (2-5x speedup for 50+ symbols)
+🎯 Advanced visualizations (order book heatmap)
+🎯 Additional strategies (arbitrage)
+
+---
+
+## 🧪 Deterministic Testing Protocol
+
+### Validation Tests:
+1. **Same Input → Same Output:** Run engine twice on same ITCH file, diff outputs (must be identical)
+2. **Order Book State:** After N messages, verify order book state matches expected snapshot
+3. **Strategy Behavior:** Given same market conditions, strategy generates same quotes
+4. **PnL Calculation:** Same fills → same PnL (verify with hand calculation)
+5. **Performance Metrics:** Same ITCH file → same latency distribution (verify reproducibility)
+
+### Test Commands:
+```bash
+# Run 1
+./hft_engine --strategy market_maker data/01302020.NASDAQ_ITCH50.gz > run1.log
+cp results/performance_report.txt results/perf1.txt
+
+# Run 2
+./hft_engine --strategy market_maker data/01302020.NASDAQ_ITCH50.gz > run2.log
+cp results/performance_report.txt results/perf2.txt
+
+# Verify determinism
+diff run1.log run2.log  # Should be identical
+diff results/perf1.txt results/perf2.txt  # Should be identical
+```
+
+---
+
+## 🚀 CUDA Performance Optimization Checklist
+
+When implementing Phase 7, follow this order:
+
+1. ✅ **First:** Get it working (correctness > speed)
+2. ✅ **Second:** Profile baseline (identify bottlenecks)
+3. ✅ **Third:** Minimize transfers (batching, pinned memory)
+4. ✅ **Fourth:** Optimize kernels (shared memory, occupancy)
+5. ✅ **Fifth:** Kernel fusion (reduce kernel launches)
+6. ✅ **Sixth:** Async operations (overlap compute/transfer)
+7. ✅ **Finally:** Validate determinism (GPU == CPU output)
+
+**Common Pitfalls:**
+- ❌ Transferring data every message (kills performance) → Batch!
+- ❌ Ignoring transfer overhead (measure with `cudaEventRecord`)
+- ❌ Over-optimizing kernel, under-optimizing transfers (transfers often dominate)
+- ❌ Non-deterministic GPU results (floating-point reduction order) → Use integer arithmetic
+
+---
+
+**Last Updated:** February 26, 2026
+**Current Phase:** 2 - Order Book Engine
+**Next Task:** Implement trader/matching/order.h
+**Design Principle:** Deterministic & Reproducible
+
+---
+
+## 🎉 Recent Accomplishments (Feb 26, 2026)
+
+### ✅ Phase 0: Project Setup (COMPLETE)
+- Directory structure created
+- Git repository initialized with .gitignore
+- CMake build system configured
+- Build verified and working
+
+### ✅ Phase 1: Core Utilities (COMPLETE)
+- ✅ **timestamp.h** - Nanosecond-precision timestamps (ITCH-compatible)
+- ✅ **endian.h** - Byte swapping for big-endian ITCH data
+- ✅ **list.h** - Intrusive doubly-linked list (zero-allocation)
+- ✅ **bintree_avl.h** - Self-balancing AVL tree (O(log n) operations)
+- ✅ **test_core.cpp** - 24/24 tests passing!
+
+**Build Status:** ✅ All tests passing
+**Test Command:** `./build/tests/test_core`
