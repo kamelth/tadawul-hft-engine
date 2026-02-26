@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <algorithm>
 #include <functional>
+#include <utility>
 
 namespace Core {
 namespace Containers {
@@ -33,6 +34,9 @@ private:
 
         Node(const Key& k, const Value& v)
             : key(k), value(v), left(nullptr), right(nullptr), parent(nullptr), height(1) {}
+
+        Node(const Key& k, Value&& v)
+            : key(k), value(std::move(v)), left(nullptr), right(nullptr), parent(nullptr), height(1) {}
     };
 
 public:
@@ -54,6 +58,13 @@ public:
     bool insert(const Key& key, const Value& value) {
         bool inserted = false;
         root_ = insert_internal(root_, nullptr, key, value, inserted);
+        if (inserted) ++size_;
+        return inserted;
+    }
+
+    bool insert(const Key& key, Value&& value) {
+        bool inserted = false;
+        root_ = insert_internal_move(root_, nullptr, key, std::move(value), inserted);
         if (inserted) ++size_;
         return inserted;
     }
@@ -211,6 +222,34 @@ private:
         return balance(node);
     }
 
+    // Insert with move semantics
+    Node* insert_internal_move(Node* node, Node* parent, const Key& key, Value&& value, bool& inserted) {
+        // Base case: found insertion point
+        if (!node) {
+            inserted = true;
+            Node* new_node = new Node(key, std::move(value));
+            new_node->parent = parent;
+            return new_node;
+        }
+
+        // Recursive insert
+        if (compare_(key, node->key)) {
+            node->left = insert_internal_move(node->left, node, key, std::move(value), inserted);
+        } else if (compare_(node->key, key)) {
+            node->right = insert_internal_move(node->right, node, key, std::move(value), inserted);
+        } else {
+            // Key already exists
+            inserted = false;
+            return node;
+        }
+
+        // Update height
+        update_height(node);
+
+        // Balance the tree
+        return balance(node);
+    }
+
     // Erase and balance
     Node* erase_internal(Node* node, const Key& key, bool& erased) {
         if (!node) {
@@ -238,7 +277,7 @@ private:
             // Case 2: Two children - replace with in-order successor
             Node* successor = find_min_internal(node->right);
             node->key = successor->key;
-            node->value = successor->value;
+            node->value = std::move(successor->value);
             node->right = erase_internal(node->right, successor->key, erased);
             erased = true; // Already marked as erased
         }
