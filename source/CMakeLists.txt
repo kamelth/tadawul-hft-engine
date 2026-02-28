@@ -1,23 +1,14 @@
 # Trading engine library and executable
 project(trader)
 
-# Trader library sources (will be added as we implement)
-set(TRADER_SOURCES
-    # trader/matching/order.cpp
-    # trader/matching/order_book.cpp
-    # trader/matching/market_manager.cpp
-    # trader/providers/nasdaq/itch_handler.cpp
-    # trader/strategy/market_maker.cpp
-    # Add more as implemented
-)
+# Main executable (simple ITCH processor)
+add_executable(hft_engine main.cpp)
+target_link_libraries(hft_engine PRIVATE core z)  # z for zlib (gzip support)
 
-# When we have sources, create library:
-# add_library(trader STATIC ${TRADER_SOURCES})
-# target_link_libraries(trader PUBLIC core)
-# target_include_directories(trader PUBLIC ${PROJECT_SOURCE_DIR}/include)
+# Strategy executable (with market maker)
+add_executable(hft_strategy main_strategy.cpp)
+target_link_libraries(hft_strategy PRIVATE core z)
 
-# Main executable (will be implemented later)
-# add_executable(hft_engine main.cpp)
-# target_link_libraries(hft_engine PRIVATE trader core)
-
-message(STATUS "Trader library configuration ready (no sources yet)")
+message(STATUS "HFT engine executables configured")
+message(STATUS "  - hft_engine: ITCH processor")
+message(STATUS "  - hft_strategy: Strategy mode with market maker")
