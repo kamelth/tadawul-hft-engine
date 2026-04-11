@@ -31,9 +31,9 @@ __pycache__/
 *.pyc
 
 # Results (optional - you may want to commit some results)
-results/*.csv
-results/*.txt
-results/*.png
+# results/*.csv
+# results/*.txt
+# results/*.png
 
 # Large data files (already have ITCH file)
 *.gz

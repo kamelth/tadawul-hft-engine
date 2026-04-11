@@ -2,21 +2,26 @@
 #include <iomanip>
 #include <string>
 #include <vector>
+#include <cstring>
+#include <fstream>
 #include "trader/providers/nasdaq/itch_reader.h"
 #include "trader/providers/nasdaq/itch_handler.h"
 #include "trader/matching/market_manager.h"
+#include "trader/performance/metrics.h"
 
 using namespace Trader;
 using namespace Trader::Providers::NASDAQ;
 using namespace Trader::Matching;
+using namespace Trader::Performance;
 
 /**
- * Simple progress callback with debugging
+ * Simple progress callback with debugging + engine metrics integration
  */
 class ProgressHandler : public MarketHandler {
 public:
-    ProgressHandler()
-        : order_count_(0)
+    explicit ProgressHandler(EngineMetrics& metrics)
+        : metrics_(metrics)
+        , order_count_(0)
         , execution_count_(0)
         , report_interval_(100000)
         , debug_(false) {}
@@ -25,6 +30,7 @@ public:
 
     void on_order_added(const Order* /*order*/) override {
         ++order_count_;
+        metrics_.book_events.record();
         if (order_count_ % report_interval_ == 0) {
             print_progress();
         }
@@ -32,6 +38,13 @@ public:
 
     void on_execution(const Execution& /*execution*/) override {
         ++execution_count_;
+        metrics_.book_events.record();
+    }
+
+    void on_order_book_update(uint32_t /*symbol_id*/,
+                              const OrderBookStats& /*stats*/,
+                              const Core::Timestamp& timestamp) override {
+        metrics_.note_itch_timestamp(timestamp.nanoseconds());
     }
 
     void print_progress() const {
@@ -45,6 +58,7 @@ public:
     }
 
 private:
+    EngineMetrics& metrics_;
     uint64_t order_count_;
     uint64_t execution_count_;
     uint64_t report_interval_;
@@ -65,17 +79,29 @@ int main(int argc, char* argv[]) {
 
     std::string filename = argv[1];
 
-    // Optional symbol filtering
+    // Optional symbol filtering + max-messages flag
     std::vector<std::string> filter_symbols;
+    uint64_t max_messages = 0;
     for (int i = 2; i < argc; ++i) {
-        filter_symbols.push_back(argv[i]);
+        if (strcmp(argv[i], "--max-messages") == 0 && i + 1 < argc) {
+            max_messages = std::strtoull(argv[i + 1], nullptr, 10);
+            ++i;
+        } else {
+            filter_symbols.push_back(argv[i]);
+        }
+    }
+    if (max_messages > 0) {
+        std::cout << "Max messages: " << max_messages << std::endl;
     }
 
     // Create market manager
     MarketManager market_manager;
 
+    // Engine-wide performance metrics
+    EngineMetrics metrics;
+
     // Create progress handler
-    ProgressHandler progress_handler;
+    ProgressHandler progress_handler(metrics);
     market_manager.set_handler(&progress_handler);
 
     // Create ITCH handler
@@ -116,7 +142,14 @@ int main(int argc, char* argv[]) {
         }
 
         if (length > 0 && length < buffer_size) {
-            bool success = itch_handler.process_message(buffer, length);
+            bool success;
+            {
+                // Wall-clock timing of the full ITCH message processing path
+                // (parse -> dispatch -> book update).
+                ScopedTimer t(metrics.itch_message);
+                success = itch_handler.process_message(buffer, length);
+            }
+            metrics.itch_messages.record();
             if (!success) {
                 ++error_count;
                 // Stop if too many consecutive errors
@@ -131,9 +164,18 @@ int main(int argc, char* argv[]) {
 
         ++message_count;
 
-        // Report progress every 1M messages
+        // Report progress + throughput sample every 1M messages
         if (message_count % 1000000 == 0) {
-            std::cout << "Processed " << message_count / 1000000 << "M messages..." << std::endl;
+            auto sample = metrics.itch_messages.sample();
+            std::cout << "Processed " << message_count / 1000000 << "M messages"
+                      << "  (rate=" << std::fixed << std::setprecision(0)
+                      << sample.interval_rate << " msgs/s)" << std::endl;
+        }
+
+        if (max_messages > 0 && message_count >= max_messages) {
+            std::cout << "Reached --max-messages limit (" << max_messages
+                      << "), stopping." << std::endl;
+            break;
         }
     }
 
@@ -187,6 +229,23 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "========================================" << std::endl;
+
+    // ---- Performance report ----
+    std::cout << "\n";
+    metrics.write_report(std::cout);
+
+    const std::string results_dir = "results";
+    std::ofstream report_file(results_dir + "/performance_report.txt");
+    if (report_file.is_open()) {
+        metrics.write_report(report_file);
+        std::cout << "\nWrote " << results_dir << "/performance_report.txt\n";
+    } else {
+        std::cerr << "\nWarning: could not write " << results_dir
+                  << "/performance_report.txt (does the directory exist?)\n";
+    }
+    metrics.write_artifacts(results_dir);
+    std::cout << "Wrote " << results_dir
+              << "/latency_*.csv and throughput_*.csv\n";
 
     return 0;
 }

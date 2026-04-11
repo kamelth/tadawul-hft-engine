@@ -13,6 +13,9 @@ target_link_libraries(test_order_book PRIVATE core)
 add_executable(test_strategy test_strategy.cpp)
 target_link_libraries(test_strategy PRIVATE core)
 
+add_executable(test_metrics test_metrics.cpp)
+target_link_libraries(test_metrics PRIVATE core)
+
 # add_executable(test_itch_handler test_itch_handler.cpp)
 # target_link_libraries(test_itch_handler PRIVATE core)
 

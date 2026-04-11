@@ -45,7 +45,13 @@ public:
     virtual void on_order_cancelled(const Order* order) {}
 
     // Called when order book is updated
-    virtual void on_order_book_update(uint32_t symbol_id, const OrderBookStats& stats) {}
+    virtual void on_order_book_update(uint32_t symbol_id,
+                                      const OrderBookStats& stats,
+                                      const Core::Timestamp& timestamp) {
+        (void)symbol_id;
+        (void)stats;
+        (void)timestamp;
+    }
 };
 
 /**
@@ -122,7 +128,7 @@ public:
             }
 
             OrderBookStats stats = book->get_stats();
-            handler_->on_order_book_update(symbol_id, stats);
+            handler_->on_order_book_update(symbol_id, stats, timestamp);
         }
 
         return executions;
@@ -151,7 +157,7 @@ public:
             handler_->on_order_cancelled(order);
 
             OrderBookStats stats = book->get_stats();
-            handler_->on_order_book_update(symbol_id, stats);
+            handler_->on_order_book_update(symbol_id, stats, timestamp);
         }
 
         return success;
@@ -186,7 +192,7 @@ public:
                 total_executions_++;
 
                 OrderBookStats stats = book->get_stats();
-                handler_->on_order_book_update(symbol_id, stats);
+                handler_->on_order_book_update(symbol_id, stats, timestamp);
             }
         }
 
@@ -210,6 +216,7 @@ public:
             return false;
         }
 
+        Core::Timestamp delete_ts = order->timestamp;
         bool success = book->delete_order(order_id);
 
         if (success) {
@@ -218,7 +225,7 @@ public:
 
             if (handler_) {
                 OrderBookStats stats = book->get_stats();
-                handler_->on_order_book_update(symbol_id, stats);
+                handler_->on_order_book_update(symbol_id, stats, delete_ts);
             }
         }
 
