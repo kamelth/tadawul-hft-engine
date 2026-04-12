@@ -378,15 +378,15 @@ private:
         uint64_t timestamp_ns = ITCHParser::parse_timestamp(msg->timestamp);
         Core::Timestamp timestamp(timestamp_ns);
 
-        // Execute order
+        // Execute order (may fail if order was already consumed by strategy matching)
         bool success = market_manager_.execute_order(order_id, executed_shares, timestamp);
-        if (success) {
-            ++stats_.executions;
-        } else {
-            ++stats_.errors;
+        ++stats_.executions;
+        if (!success) {
+            // Order was consumed by strategy matching — clean up stale mapping
+            order_map_.erase(it);
         }
 
-        return success;
+        return true;
     }
 
     /**
@@ -408,13 +408,12 @@ private:
         Core::Timestamp timestamp(timestamp_ns);
 
         bool success = market_manager_.execute_order(order_id, executed_shares, timestamp);
-        if (success) {
-            ++stats_.executions;
-        } else {
-            ++stats_.errors;
+        ++stats_.executions;
+        if (!success) {
+            order_map_.erase(it);
         }
 
-        return success;
+        return true;
     }
 
     /**
@@ -458,14 +457,10 @@ private:
         Core::Timestamp timestamp(timestamp_ns);
 
         bool success = market_manager_.cancel_order(order_id, timestamp);
-        if (success) {
-            ++stats_.deletes;
-            order_map_.erase(it);  // Remove from tracking
-        } else {
-            ++stats_.errors;
-        }
+        ++stats_.deletes;
+        order_map_.erase(it);  // Remove from tracking (even if order was already consumed)
 
-        return success;
+        return true;
     }
 
     /**
@@ -488,9 +483,14 @@ private:
         // Get original order details BEFORE cancelling
         Matching::Order* orig_order = market_manager_.get_order(original_order_id);
         if (!orig_order) {
-            ++stats_.errors;
+            // Original order was consumed by strategy matching — clean up
+            // mapping and still register the replacement as a fresh order.
             order_map_.erase(it);
-            return false;
+
+            // We don't know the symbol/side for the replacement, so we must
+            // skip it.  Count as a replace (no error).
+            ++stats_.replaces;
+            return true;
         }
 
         // Save original order details

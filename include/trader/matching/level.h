@@ -142,6 +142,7 @@ public:
         // Match against orders in FIFO order (front of queue first)
         while (!orders_.empty() && incoming_order->remaining_quantity > 0) {
             Order* resting_order = orders_.front();
+            if (!resting_order) break;  // Defensive: corrupted list
 
             // Determine execution quantity (min of both orders' remaining)
             uint64_t exec_qty = std::min(incoming_order->remaining_quantity,

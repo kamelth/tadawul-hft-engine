@@ -267,6 +267,7 @@ private:
      */
     void match_buy_order(Order* order, std::vector<Execution>& executions,
                         const Core::Timestamp& timestamp) {
+        size_t exec_start = executions.size();
         while (order->remaining_quantity > 0) {
             // Get best ask
             Level* best_ask_level = ask_levels_.find_min();
@@ -287,6 +288,11 @@ private:
                 ask_levels_.erase(best_ask);
             }
         }
+
+        // Remove filled resting orders from the book's lookup map so that
+        // later ITCH Delete/Execute messages don't try to operate on orders
+        // that are no longer in any Level's list.
+        cleanup_filled_resting_orders(executions, exec_start);
     }
 
     /**
@@ -294,6 +300,7 @@ private:
      */
     void match_sell_order(Order* order, std::vector<Execution>& executions,
                          const Core::Timestamp& timestamp) {
+        size_t exec_start = executions.size();
         while (order->remaining_quantity > 0) {
             // Get best bid
             Level* best_bid_level = bid_levels_.find_max();
@@ -312,6 +319,27 @@ private:
             // Remove level if empty
             if (best_bid_level->empty()) {
                 bid_levels_.erase(best_bid);
+            }
+        }
+
+        cleanup_filled_resting_orders(executions, exec_start);
+    }
+
+    /**
+     * Remove filled resting orders from the book's orders_ map after matching.
+     * Level::match() pops filled orders from the Level's intrusive list, but
+     * they remain in orders_.  If a later ITCH Delete/Execute arrives for that
+     * order_id, remove_order_from_book would call List::remove on an item no
+     * longer in the list, corrupting head_/tail_.
+     */
+    void cleanup_filled_resting_orders(const std::vector<Execution>& executions,
+                                       size_t from) {
+        for (size_t i = from; i < executions.size(); ++i) {
+            uint64_t match_id = executions[i].match_order_id;
+            auto it = orders_.find(match_id);
+            if (it != orders_.end() && it->second->is_filled()) {
+                orders_.erase(it);
+                --order_count_;
             }
         }
     }

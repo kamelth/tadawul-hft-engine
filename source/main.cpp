@@ -8,6 +8,7 @@
 #include "trader/providers/nasdaq/itch_handler.h"
 #include "trader/matching/market_manager.h"
 #include "trader/performance/metrics.h"
+#include "trader/performance/market_impact.h"
 
 using namespace Trader;
 using namespace Trader::Providers::NASDAQ;
@@ -21,12 +22,14 @@ class ProgressHandler : public MarketHandler {
 public:
     explicit ProgressHandler(EngineMetrics& metrics)
         : metrics_(metrics)
+        , impact_collector_(nullptr)
         , order_count_(0)
         , execution_count_(0)
         , report_interval_(100000)
         , debug_(false) {}
 
     void set_debug(bool debug) { debug_ = debug; }
+    void set_impact_collector(MarketImpactCollector* c) { impact_collector_ = c; }
 
     void on_order_added(const Order* /*order*/) override {
         ++order_count_;
@@ -45,6 +48,9 @@ public:
                               const OrderBookStats& /*stats*/,
                               const Core::Timestamp& timestamp) override {
         metrics_.note_itch_timestamp(timestamp.nanoseconds());
+        if (impact_collector_) {
+            impact_collector_->maybe_sample(timestamp.nanoseconds());
+        }
     }
 
     void print_progress() const {
@@ -59,6 +65,7 @@ public:
 
 private:
     EngineMetrics& metrics_;
+    MarketImpactCollector* impact_collector_;
     uint64_t order_count_;
     uint64_t execution_count_;
     uint64_t report_interval_;
@@ -100,8 +107,12 @@ int main(int argc, char* argv[]) {
     // Engine-wide performance metrics
     EngineMetrics metrics;
 
+    // Create market impact collector (sample every 10s of ITCH time)
+    MarketImpactCollector impact_collector(market_manager, 10'000'000'000ULL);
+
     // Create progress handler
     ProgressHandler progress_handler(metrics);
+    progress_handler.set_impact_collector(&impact_collector);
     market_manager.set_handler(&progress_handler);
 
     // Create ITCH handler
@@ -230,11 +241,16 @@ int main(int argc, char* argv[]) {
 
     std::cout << "========================================" << std::endl;
 
+    const std::string results_dir = "results";
+
+    // ---- Market impact snapshots (baseline) ----
+    std::cout << "\n";
+    impact_collector.write_summary(std::cout);
+    impact_collector.write_csv(results_dir + "/baseline_snapshots.csv");
+
     // ---- Performance report ----
     std::cout << "\n";
     metrics.write_report(std::cout);
-
-    const std::string results_dir = "results";
     std::ofstream report_file(results_dir + "/performance_report.txt");
     if (report_file.is_open()) {
         metrics.write_report(report_file);

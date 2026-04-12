@@ -114,6 +114,20 @@ public:
         // Add to order book (may execute immediately)
         executions = book->add_order(order, timestamp);
 
+        // Clean up filled resting orders from manager's map.
+        // Level::match() and OrderBook already removed them from the book;
+        // we must also free the Order objects and drop them from our map so
+        // that later ITCH Delete/Execute messages get a clean "not found".
+        for (const auto& exec : executions) {
+            if (exec.match_order_id != 0) {
+                auto match_it = orders_.find(exec.match_order_id);
+                if (match_it != orders_.end() && match_it->second->is_filled()) {
+                    delete match_it->second;
+                    orders_.erase(match_it);
+                }
+            }
+        }
+
         // Track order
         orders_[order_id] = order;
 
