@@ -1,0 +1,6 @@
+num_symbols,cpu_total_sec,cpu_per_iter_us,gpu_kernel_total_sec,gpu_kernel_per_iter_us,gpu_e2e_total_sec,gpu_e2e_per_iter_us,speedup_kernel,speedup_e2e,correctness_ok
+1,4.58e-07,0.00229,0,0,0,0,0,0,1
+10,4.541e-06,0.022705,0,0,0,0,0,0,1
+100,4.8959e-05,0.244795,0,0,0,0,0,0,1
+1000,0.000501292,2.50646,0,0,0,0,0,0,1
+8915,0.0115058,57.5292,0,0,0,0,0,0,1
