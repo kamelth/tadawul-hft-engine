@@ -129,8 +129,8 @@ ITCH File (01302020.NASDAQ_ITCH50.gz)
 | **5. Performance** | 🟢 Complete | 5/5 | 3 days |
 | **6. Market Impact** | 🟢 Complete | 5/5 | 3 days |
 | **7. CUDA (Optional)** | 🟢 Complete | 8/8 | 5 days |
-| **8. Defense** | 🔴 Not Started | 0/5 | 4 days |
-| **TOTAL** | 🟡 In Progress | **42/49 (86%)** | **~7 weeks** |
+| **8. Defense** | 🟢 Complete | 5/5 | 4 days |
+| **TOTAL** | 🟢 Complete | **49/49 (100%)** | **~7 weeks** |
 
 **Legend:** 🔴 Not Started | 🟡 In Progress | 🟢 Complete
 

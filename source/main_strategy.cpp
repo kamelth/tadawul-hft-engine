@@ -298,6 +298,7 @@ int main(int argc, char* argv[]) {
             } else {
                 error_count = 0;
             }
+
         }
 
         ++message_count;
