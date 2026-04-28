@@ -3,6 +3,7 @@
 
 #include "trader/strategy/strategy_base.h"
 #include "trader/strategy/position.h"
+#include "trader/strategy/signal_table.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -27,27 +28,50 @@ public:
      * Market Maker Parameters (all deterministic)
      */
     struct Params {
-        uint64_t spread_ticks;         // Spread in ticks (1 tick = $0.0001)
+        uint64_t spread_ticks;         // Base spread (ticks) — used when volatility=0
         uint64_t quote_size;           // Size of each quote (shares)
-        int64_t max_position;          // Max position (long, shares)
-        uint64_t skew_per_share;       // Price skew per share of inventory (ticks)
-        bool enable_inventory_skew;    // Whether to skew quotes based on inventory
+        int64_t  max_position;         // Max position (long, shares)
+        uint64_t skew_per_share;       // Inventory skew: ticks per share held
+        bool     enable_inventory_skew;
+
+        // ── v2: GPU-signal-driven adaptive parameters ──────────────────────
+        bool     enable_adaptive_spread;  // Scale spread by realized volatility
+        uint64_t vol_multiplier;          // spread = max(spread_ticks, vol_mult × σ)
+        uint64_t min_spread_ticks;        // Floor: never quote tighter than this
+        uint64_t max_spread_ticks;        // Ceiling: never quote wider than this
+
+        bool     enable_flow_skew;        // Skew quotes against order-flow imbalance
+        uint64_t flow_skew_factor;        // Additional skew ticks per 1000 imbalance units
 
         Params()
-            : spread_ticks(10)         // Default: 10 ticks ($0.0010)
-            , quote_size(100)          // Default: 100 shares
-            , max_position(1000)       // Default: max 1000 shares
-            , skew_per_share(1)        // Default: 1 tick per share
-            , enable_inventory_skew(true) {}
+            : spread_ticks(10)
+            , quote_size(100)
+            , max_position(1000)
+            , skew_per_share(1)
+            , enable_inventory_skew(true)
+            , enable_adaptive_spread(false)
+            , vol_multiplier(3)           // spread = 3 × σ  (3-sigma band)
+            , min_spread_ticks(5)         // never tighter than $0.0005
+            , max_spread_ticks(200)       // never wider than $0.0200
+            , enable_flow_skew(false)
+            , flow_skew_factor(2)         // 2 ticks per 1000 imbalance units
+        {}
     };
 
     explicit MarketMaker(const Params& params = Params())
         : params_(params)
+        , signals_(nullptr)
         , position_manager_()
         , pending_orders_()
         , pending_cancellations_()
         , active_orders_()
         , last_mid_prices_() {}
+
+    /**
+     * Attach the live signal table (volatility + flow imbalance).
+     * Must be set before trading starts if adaptive features are enabled.
+     */
+    void set_signal_table(const SignalTable* signals) { signals_ = signals; }
 
     // StrategyBase interface implementation
     void on_order_book_update(
@@ -55,68 +79,97 @@ public:
         const Matching::OrderBookStats& stats,
         const Core::Timestamp& timestamp
     ) override {
-        // Skip if no valid market (no bid or ask)
-        if (stats.best_bid_price == 0 || stats.best_ask_price == 0) {
-            return;
-        }
+        if (stats.best_bid_price == 0 || stats.best_ask_price == 0) return;
 
-        // Calculate mid-price
         uint64_t mid_price = (stats.best_bid_price + stats.best_ask_price) / 2;
         last_mid_prices_[symbol_id] = mid_price;
 
-        // Get current position
-        Position& position = position_manager_.get_position(symbol_id);
-        int64_t current_position = position.get_shares();
-
-        // Check if we're at max position (stop buying)
-        bool can_buy = current_position < params_.max_position;
+        Position& position        = position_manager_.get_position(symbol_id);
+        int64_t   current_position = position.get_shares();
+        bool can_buy  = current_position < params_.max_position;
         bool can_sell = current_position > 0;
 
-        // Cancel existing orders for this symbol
         cancel_symbol_orders(symbol_id);
 
-        // Calculate inventory skew
-        int64_t inventory_skew = 0;
-        if (params_.enable_inventory_skew) {
-            // Positive position → increase bid/ask (discourage buying)
-            // Negative position → decrease bid/ask (encourage buying)
-            inventory_skew = current_position * static_cast<int64_t>(params_.skew_per_share);
+        // ── Signal 1: Volatility-adaptive spread ──────────────────────────
+        uint64_t half_spread = params_.spread_ticks / 2;  // baseline fallback
+
+        if (params_.enable_adaptive_spread && signals_ != nullptr) {
+            uint64_t sigma = signals_->volatility_ticks(symbol_id);
+            if (sigma > 0) {
+                uint64_t adaptive = params_.vol_multiplier * sigma;
+                // Floor: never TIGHTER than the baseline spread_ticks
+                // (min_spread_ticks is an additional absolute lower bound)
+                adaptive = std::max({adaptive, params_.min_spread_ticks, params_.spread_ticks});
+                // Ceiling
+                adaptive = std::min(adaptive, params_.max_spread_ticks);
+                half_spread = adaptive / 2;
+            }
         }
 
-        // Generate new quotes
+        // ── Signal 2: Order-flow imbalance skew ───────────────────────────
+        // flow_skew > 0  →  buying pressure  (price likely rising)
+        // flow_skew < 0  →  selling pressure (price likely falling)
+        //
+        // Applied SYMMETRICALLY (quote-following / market-shift):
+        //   both bid and ask shift in the direction of the imbalance.
+        //
+        //   Buying pressure  → shift both quotes UP:
+        //     bid higher  (we follow the market, not selling out early)
+        //     ask higher  (extract premium from aggressive buyers)
+        //
+        //   Selling pressure → shift both quotes DOWN:
+        //     bid lower   (don't buy into a falling market)
+        //     ask lower   (stay competitive against an eager seller side)
+        //
+        // This is the "Avellaneda-Stoikov" approach: the whole quote ladder
+        // tracks the inferred fair value shift rather than just widening one side.
+        int64_t flow_skew = 0;
+        if (params_.enable_flow_skew && signals_ != nullptr) {
+            int64_t imb = signals_->imbalance(symbol_id);  // [-10000, +10000]
+            flow_skew = (imb * static_cast<int64_t>(params_.flow_skew_factor)) / 1000;
+        }
+
+        // ── Inventory skew (symmetric — shifts whole quote to reduce inventory) ──
+        int64_t inventory_skew = 0;
+        if (params_.enable_inventory_skew) {
+            inventory_skew = current_position
+                           * static_cast<int64_t>(params_.skew_per_share);
+        }
+
+        // ── Generate quotes ───────────────────────────────────────────────
+        // bid:  mid - half_spread - inventory_skew + flow_skew
+        //   inventory_skew: when long, lower bid (buy less aggressively)
+        //   flow_skew:      positive = buying pressure → bid shifts UP (follow market)
+        //                   negative = selling pressure → bid shifts DOWN (don't catch knife)
+        //
+        // ask:  mid + half_spread - inventory_skew + flow_skew
+        //   inventory_skew: when long, lower ask (sell more to reduce inventory)
+        //   flow_skew:      positive = buying pressure → ask shifts UP (charge premium)
+        //                   negative = selling pressure → ask shifts DOWN (stay competitive)
         if (can_buy) {
-            // Bid quote: mid - spread/2 + skew
-            int64_t bid_offset = static_cast<int64_t>(params_.spread_ticks / 2) + inventory_skew;
-            int64_t bid_price = static_cast<int64_t>(mid_price) - bid_offset;
+            int64_t bid_price = static_cast<int64_t>(mid_price)
+                              - static_cast<int64_t>(half_spread)
+                              - inventory_skew
+                              + flow_skew;
 
             if (bid_price > 0 && bid_price < static_cast<int64_t>(stats.best_ask_price)) {
-                StrategyOrder bid_order(
-                    symbol_id,
-                    Matching::OrderSide::Buy,
-                    Matching::OrderType::Limit,
-                    static_cast<uint64_t>(bid_price),
-                    params_.quote_size,
-                    timestamp
-                );
-                pending_orders_.push_back(bid_order);
+                pending_orders_.push_back(StrategyOrder(
+                    symbol_id, Matching::OrderSide::Buy, Matching::OrderType::Limit,
+                    static_cast<uint64_t>(bid_price), params_.quote_size, timestamp));
             }
         }
 
         if (can_sell) {
-            // Ask quote: mid + spread/2 + skew
-            int64_t ask_offset = static_cast<int64_t>(params_.spread_ticks / 2) + inventory_skew;
-            int64_t ask_price = static_cast<int64_t>(mid_price) + ask_offset;
+            int64_t ask_price = static_cast<int64_t>(mid_price)
+                              + static_cast<int64_t>(half_spread)
+                              - inventory_skew
+                              + flow_skew;
 
             if (ask_price > static_cast<int64_t>(stats.best_bid_price)) {
-                StrategyOrder ask_order(
-                    symbol_id,
-                    Matching::OrderSide::Sell,
-                    Matching::OrderType::Limit,
-                    static_cast<uint64_t>(ask_price),
-                    params_.quote_size,
-                    timestamp
-                );
-                pending_orders_.push_back(ask_order);
+                pending_orders_.push_back(StrategyOrder(
+                    symbol_id, Matching::OrderSide::Sell, Matching::OrderType::Limit,
+                    static_cast<uint64_t>(ask_price), params_.quote_size, timestamp));
             }
         }
     }
@@ -183,10 +236,25 @@ public:
     // Additional methods for monitoring
 
     /**
-     * Register an order ID as active (called when order is submitted)
+     * Register a resting order for passive-fill tracking.
+     * Called after add_order() when the order was not immediately fully filled.
      */
-    void register_order(uint64_t order_id, uint32_t symbol_id) {
-        active_orders_[order_id] = symbol_id;
+    void register_order(uint64_t order_id, uint32_t symbol_id, Matching::OrderSide side) {
+        active_orders_[order_id] = {symbol_id, side};
+    }
+
+    /**
+     * Look up a resting strategy order by ID.
+     * Returns true and fills symbol_id/side if found; false if not ours.
+     */
+    bool lookup_active_order(uint64_t order_id,
+                             uint32_t& symbol_id,
+                             Matching::OrderSide& side) const {
+        auto it = active_orders_.find(order_id);
+        if (it == active_orders_.end()) return false;
+        symbol_id = it->second.first;
+        side      = it->second.second;
+        return true;
     }
 
     /**
@@ -214,19 +282,21 @@ public:
     }
 
 private:
-    Params params_;
-    PositionManager position_manager_;
+    Params             params_;
+    const SignalTable* signals_;    // not owned — set via set_signal_table()
+    PositionManager    position_manager_;
     std::vector<StrategyOrder> pending_orders_;
     std::vector<uint64_t> pending_cancellations_;
-    std::unordered_map<uint64_t, uint32_t> active_orders_;  // order_id → symbol_id
+    // order_id → {symbol_id, side}  (resting quotes awaiting passive fill)
+    std::unordered_map<uint64_t, std::pair<uint32_t, Matching::OrderSide>> active_orders_;
     std::unordered_map<uint32_t, uint64_t> last_mid_prices_;  // symbol_id → mid_price
 
     /**
      * Cancel all active orders for a symbol
      */
     void cancel_symbol_orders(uint32_t symbol_id) {
-        for (const auto& [order_id, oid_symbol_id] : active_orders_) {
-            if (oid_symbol_id == symbol_id) {
+        for (const auto& [order_id, sym_side] : active_orders_) {
+            if (sym_side.first == symbol_id) {
                 pending_cancellations_.push_back(order_id);
             }
         }

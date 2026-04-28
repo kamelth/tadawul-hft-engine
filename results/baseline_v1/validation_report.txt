@@ -1,0 +1,22 @@
+===========================================================================
+HFT Engine — Python Cross-Validation Report
+===========================================================================
+Trade log:   results/trade_log.csv
+Total fills: 893
+
+VALIDATION PASSED — Python PnL matches C++ on every fill
+
+Per-Symbol Summary (Python recomputed):
+Symbol      Buys   Sells    Shares     Avg Buy    Avg Sell   Realized PnL
+---------------------------------------------------------------------------
+AAPL         119     119       931  $ 321.2467  $ 321.4062  $    386.4685
+AMZN          84       5      1005  $1852.6896  $1848.6564  $    -24.1992
+GOOGL         99      45       928  $1440.4372  $1438.8293  $   -932.5820
+MSFT          40       1      1088  $ 174.5023  $ 172.7005  $   -180.1800
+TSLA         142     239         0  $ 640.4360  $ 639.3472  $  -5975.3344
+---------------------------------------------------------------------------
+TOTAL        484     409                                    $  -6725.8271
+
+Price units: 1 unit = $0.0001  (integer prices, no float rounding)
+All PnL values are independently recomputed in Python.
+===========================================================================

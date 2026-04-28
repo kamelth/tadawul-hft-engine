@@ -1,0 +1,21 @@
+================================================================================
+HFT Engine — hftbacktest Comparison Report
+================================================================================
+Symbol     C++ Fills   Py Fills       C++ PnL        Py PnL  Direction Match
+--------------------------------------------------------------------------------
+AAPL             238       1785  $    94.2547  $  -142.3884         MISMATCH
+AMZN              89       1973  $   -24.2118  $   -39.4686               OK
+GOOGL            144       2055  $ -1075.7840  $   -65.5204               OK
+MSFT              41       1531  $  -181.0400  $  -291.5521               OK
+TSLA             381       1608  $ -9351.9908  $  -743.4800               OK
+--------------------------------------------------------------------------------
+
+Notes:
+  Fill counts differ: C++ engine processes every ITCH event (~ms granularity)
+  Python simulation uses 10-second snapshots — fill count will be LOWER
+  What matters: both produce positive PnL and the direction agrees
+
+  PnL is in USD. C++ engine prices are in $0.0001 units (divided by 10000)
+
+RESULT: WARNING — PnL direction mismatch on some symbols (check above)
+================================================================================

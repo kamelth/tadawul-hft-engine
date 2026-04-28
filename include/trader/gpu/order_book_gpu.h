@@ -62,6 +62,7 @@ struct SymbolAnalytics {
     uint64_t* vwap_ask_top10;      // [N] volume-weighted avg price, top 10 ask levels
 
     int64_t*  imbalance_x10000;    // [N] (bid_vol - ask_vol) * 10000 / (bid_vol + ask_vol)
+    uint64_t* volatility_ticks;   // [N] rolling std-dev of mid-price changes (in ticks)
 };
 
 /**
@@ -123,6 +124,7 @@ struct HostAnalyticsStorage {
     std::vector<uint64_t> vwap_bid_top10;
     std::vector<uint64_t> vwap_ask_top10;
     std::vector<int64_t>  imbalance_x10000;
+    std::vector<uint64_t> volatility_ticks;
 
     SymbolAnalytics view(uint32_t num_symbols) {
         best_bid.assign(num_symbols, 0);
@@ -134,18 +136,20 @@ struct HostAnalyticsStorage {
         vwap_bid_top10.assign(num_symbols, 0);
         vwap_ask_top10.assign(num_symbols, 0);
         imbalance_x10000.assign(num_symbols, 0);
+        volatility_ticks.assign(num_symbols, 0);
 
         SymbolAnalytics a;
-        a.num_symbols      = num_symbols;
-        a.best_bid         = best_bid.data();
-        a.best_ask         = best_ask.data();
-        a.spread           = spread.data();
-        a.mid_price        = mid_price.data();
-        a.total_bid_volume = total_bid_volume.data();
-        a.total_ask_volume = total_ask_volume.data();
-        a.vwap_bid_top10   = vwap_bid_top10.data();
-        a.vwap_ask_top10   = vwap_ask_top10.data();
-        a.imbalance_x10000 = imbalance_x10000.data();
+        a.num_symbols       = num_symbols;
+        a.best_bid          = best_bid.data();
+        a.best_ask          = best_ask.data();
+        a.spread            = spread.data();
+        a.mid_price         = mid_price.data();
+        a.total_bid_volume  = total_bid_volume.data();
+        a.total_ask_volume  = total_ask_volume.data();
+        a.vwap_bid_top10    = vwap_bid_top10.data();
+        a.vwap_ask_top10    = vwap_ask_top10.data();
+        a.imbalance_x10000  = imbalance_x10000.data();
+        a.volatility_ticks  = volatility_ticks.data();
         return a;
     }
 };

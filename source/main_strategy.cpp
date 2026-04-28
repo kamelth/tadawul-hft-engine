@@ -8,8 +8,43 @@
 #include "trader/providers/nasdaq/itch_handler.h"
 #include "trader/matching/market_manager.h"
 #include "trader/strategy/market_maker.h"
+#include "trader/strategy/signal_table.h"
 #include "trader/performance/metrics.h"
 #include "trader/performance/market_impact.h"
+
+/**
+ * TradeLogger — writes one CSV row per strategy fill.
+ *
+ * Columns (all prices in raw $0.0001 integer units):
+ *   timestamp_ns, symbol, side, fill_price, fill_qty, position_after, realized_pnl
+ */
+class TradeLogger {
+public:
+    explicit TradeLogger(const std::string& path) : file_(path) {
+        if (file_.is_open()) {
+            file_ << "timestamp_ns,symbol,side,fill_price,fill_qty,"
+                     "position_after,realized_pnl\n";
+        } else {
+            std::cerr << "Warning: could not open trade log: " << path << "\n";
+        }
+    }
+
+    bool is_open() const { return file_.is_open(); }
+
+    void log(uint64_t ts_ns, const std::string& symbol, const char* side,
+             uint64_t fill_price, uint64_t fill_qty,
+             int64_t position_after, int64_t realized_pnl) {
+        if (!file_.is_open()) return;
+        file_ << ts_ns << ',' << symbol << ',' << side << ','
+              << fill_price << ',' << fill_qty << ','
+              << position_after << ',' << realized_pnl << '\n';
+    }
+
+    void flush() { if (file_.is_open()) file_.flush(); }
+
+private:
+    std::ofstream file_;
+};
 
 using namespace Trader;
 using namespace Trader::Providers::NASDAQ;
@@ -29,12 +64,18 @@ public:
         , strategy_(strategy)
         , metrics_(metrics)
         , impact_collector_(nullptr)
+        , market_maker_ptr_(nullptr)
+        , trade_logger_(nullptr)
+        , signal_table_(nullptr)
         , order_count_(0)
         , execution_count_(0)
         , strategy_fills_(0)
         , report_interval_(100000) {}
 
     void set_impact_collector(MarketImpactCollector* c) { impact_collector_ = c; }
+    void set_market_maker(MarketMaker* mm) { market_maker_ptr_ = mm; }
+    void set_trade_logger(TradeLogger* logger) { trade_logger_ = logger; }
+    void set_signal_table(Strategy::SignalTable* st) { signal_table_ = st; }
 
     void on_order_added(const Order* order) override {
         (void)order;
@@ -49,10 +90,44 @@ public:
         ++execution_count_;
         metrics_.book_events.record();
 
-        // Notify strategy of market execution
-        // (Note: we don't have symbol_id in Execution, would need to track it separately)
-        // For now, skip this notification as it's not critical for market maker
-        (void)execution;
+        // Detect passive fills: did this incoming order hit one of our resting quotes?
+        if (market_maker_ptr_ && execution.match_order_id != 0) {
+            uint32_t sym_id = 0;
+            Matching::OrderSide side;
+            if (market_maker_ptr_->lookup_active_order(execution.match_order_id, sym_id, side)) {
+                // Our resting order was filled — notify strategy
+                strategy_->on_order_filled(
+                    execution.match_order_id,
+                    sym_id,
+                    side,
+                    execution.execution_price,
+                    execution.execution_quantity,
+                    execution.timestamp
+                );
+
+                ++strategy_fills_;
+
+                // Log to trade log
+                if (trade_logger_) {
+                    int64_t pos_after = market_maker_ptr_->get_position(sym_id);
+                    int64_t realized_pnl = 0;
+                    const Strategy::Position* pos =
+                        market_maker_ptr_->get_position_manager().get_position(sym_id);
+                    if (pos) realized_pnl = pos->calculate_realized_pnl();
+
+                    const Matching::Symbol* sym =
+                        market_manager_.symbol_registry().get_symbol(sym_id);
+                    std::string sym_name = sym ? sym->symbol_name
+                                               : std::to_string(sym_id);
+                    const char* side_str =
+                        (side == Matching::OrderSide::Buy) ? "BUY" : "SELL";
+
+                    trade_logger_->log(execution.timestamp.nanoseconds(), sym_name, side_str,
+                                       execution.execution_price, execution.execution_quantity,
+                                       pos_after, realized_pnl);
+                }
+            }
+        }
     }
 
     void on_order_book_update(uint32_t symbol_id,
@@ -74,6 +149,14 @@ public:
         // Only process if we have valid market (bid and ask present)
         if (stats.best_bid_price == 0 || stats.best_ask_price == 0) {
             return;
+        }
+
+        // Feed signal table before strategy runs (volatility + flow imbalance)
+        if (signal_table_) {
+            signal_table_->update(symbol_id,
+                                  (stats.best_bid_price + stats.best_ask_price) / 2,
+                                  stats.best_bid_volume,
+                                  stats.best_ask_volume);
         }
 
         // Time the strategy decision path (callback + quote emission).
@@ -107,6 +190,9 @@ private:
     StrategyBase* strategy_;
     EngineMetrics& metrics_;
     MarketImpactCollector* impact_collector_;
+    MarketMaker*           market_maker_ptr_;
+    TradeLogger*           trade_logger_;
+    Strategy::SignalTable* signal_table_;
     uint64_t order_count_;
     uint64_t execution_count_;
     uint64_t strategy_fills_;
@@ -144,8 +230,19 @@ private:
                 order.timestamp
             );
 
-            // Track fills
+            // Track immediate fills
             strategy_fills_ += executions.size();
+
+            // If order was not fully filled immediately, it rests in the book.
+            // Register it so on_execution() can detect passive fills later.
+            if (market_maker_ptr_) {
+                uint64_t filled_qty = 0;
+                for (const auto& exec : executions) filled_qty += exec.execution_quantity;
+                if (filled_qty < order.quantity) {
+                    uint64_t resting_id = market_manager_.get_last_order_id();
+                    market_maker_ptr_->register_order(resting_id, order.symbol_id, order.side);
+                }
+            }
 
             // Notify strategy of immediate fills
             for (const auto& exec : executions) {
@@ -157,6 +254,26 @@ private:
                     exec.execution_quantity,  // Correct field name
                     order.timestamp
                 );
+
+                // Log fill to trade log (position already updated by on_order_filled)
+                if (trade_logger_ && market_maker_ptr_) {
+                    int64_t pos_after = market_maker_ptr_->get_position(order.symbol_id);
+                    int64_t realized_pnl = 0;
+                    const Strategy::Position* pos =
+                        market_maker_ptr_->get_position_manager().get_position(order.symbol_id);
+                    if (pos) realized_pnl = pos->calculate_realized_pnl();
+
+                    const Matching::Symbol* sym =
+                        market_manager_.symbol_registry().get_symbol(order.symbol_id);
+                    std::string sym_name = sym ? sym->symbol_name
+                                               : std::to_string(order.symbol_id);
+                    const char* side_str =
+                        (order.side == Matching::OrderSide::Buy) ? "BUY" : "SELL";
+
+                    trade_logger_->log(order.timestamp.nanoseconds(), sym_name, side_str,
+                                       exec.execution_price, exec.execution_quantity,
+                                       pos_after, realized_pnl);
+                }
             }
 
             // If order wasn't fully filled, register it as active
@@ -188,6 +305,9 @@ int main(int argc, char* argv[]) {
     std::string strategy_name;
     std::vector<std::string> filter_symbols;
     uint64_t max_messages = 0;  // 0 = process entire file
+    std::string trade_log_path;  // empty = disable trade log
+    bool use_adaptive = false;        // enable v2 adaptive spread + flow skew
+    bool use_adaptive_vol_only = false;  // enable only volatility-adaptive spread (no flow skew)
 
     // Parse arguments
     for (int i = 2; i < argc; ++i) {
@@ -198,6 +318,13 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--max-messages") == 0 && i + 1 < argc) {
             max_messages = std::strtoull(argv[i + 1], nullptr, 10);
             ++i;
+        } else if (strcmp(argv[i], "--trade-log") == 0 && i + 1 < argc) {
+            trade_log_path = argv[i + 1];
+            ++i;
+        } else if (strcmp(argv[i], "--adaptive") == 0) {
+            use_adaptive = true;
+        } else if (strcmp(argv[i], "--adaptive-vol") == 0) {
+            use_adaptive_vol_only = true;
         } else {
             filter_symbols.push_back(argv[i]);
         }
@@ -218,17 +345,39 @@ int main(int argc, char* argv[]) {
     if (use_strategy) {
         if (strategy_name == "market_maker") {
             MarketMaker::Params params;
-            params.spread_ticks = 10;        // 10 ticks = $0.0010
-            params.quote_size = 100;         // 100 shares per quote
-            params.max_position = 1000;      // Max 1000 shares
+            params.spread_ticks          = 10;
+            params.quote_size            = 100;
+            params.max_position          = 1000;
             params.enable_inventory_skew = true;
 
+            if (use_adaptive || use_adaptive_vol_only) {
+                params.enable_adaptive_spread = true;
+                params.vol_multiplier         = 3;    // spread = 3 × σ
+                params.min_spread_ticks       = 5;    // floor  $0.0005
+                params.max_spread_ticks       = 200;  // ceiling $0.0200
+            }
+            if (use_adaptive) {
+                params.enable_flow_skew       = true;
+                params.flow_skew_factor       = 2;    // 2 ticks per 1000 imbalance units
+            }
+
+            const char* mode_tag = use_adaptive         ? " (ADAPTIVE v2 vol+flow)"
+                                 : use_adaptive_vol_only ? " (ADAPTIVE v2 vol-only)"
+                                 : " (Fixed v1)";
             market_maker = new MarketMaker(params);
-            std::cout << "Strategy: Market Maker" << std::endl;
+            std::cout << "Strategy: Market Maker" << mode_tag << std::endl;
             std::cout << "  Spread: " << params.spread_ticks << " ticks ($"
                       << (params.spread_ticks / 10000.0) << ")" << std::endl;
             std::cout << "  Quote Size: " << params.quote_size << " shares" << std::endl;
             std::cout << "  Max Position: " << params.max_position << " shares" << std::endl;
+            if (use_adaptive || use_adaptive_vol_only) {
+                std::cout << "  Adaptive spread: ON  (vol_mult=" << params.vol_multiplier
+                          << ", min=" << params.min_spread_ticks
+                          << ", max=" << params.max_spread_ticks << " ticks)" << std::endl;
+                std::cout << "  Flow skew:       "
+                          << (use_adaptive ? "ON  (factor=" + std::to_string(params.flow_skew_factor) + ")" : "OFF")
+                          << std::endl;
+            }
         } else {
             std::cerr << "Unknown strategy: " << strategy_name << std::endl;
             return 1;
@@ -238,9 +387,39 @@ int main(int argc, char* argv[]) {
     // Create market impact collector (sample every 10s of ITCH time)
     MarketImpactCollector impact_collector(market_manager, 10'000'000'000ULL);
 
+    // Results directory (used by trade log, market impact, and performance report)
+    const std::string results_dir = "results";
+
+    // Create trade logger (writes fills CSV for Python validation)
+    // Default path when strategy is active and no --trade-log given: results/trade_log.csv
+    if (use_strategy && trade_log_path.empty()) {
+        trade_log_path = results_dir + "/trade_log.csv";
+    }
+    TradeLogger* trade_logger = nullptr;
+    if (!trade_log_path.empty()) {
+        trade_logger = new TradeLogger(trade_log_path);
+        if (trade_logger->is_open()) {
+            std::cout << "Trade log: " << trade_log_path << std::endl;
+        }
+    }
+
+    // Create signal table — feeds volatility σ and order-flow imbalance to the
+    // adaptive market maker.  Created unconditionally so the handler can always
+    // call set_signal_table(); the market maker only reads it when its own
+    // enable_adaptive_spread / enable_flow_skew flags are true.
+    Strategy::SignalTable signal_table;
+
     // Create strategy handler
     StrategyHandler strategy_handler(market_manager, market_maker, metrics);
     strategy_handler.set_impact_collector(&impact_collector);
+    if (market_maker) {
+        strategy_handler.set_market_maker(market_maker);
+        market_maker->set_signal_table(&signal_table);
+    }
+    if (trade_logger) {
+        strategy_handler.set_trade_logger(trade_logger);
+    }
+    strategy_handler.set_signal_table(&signal_table);
     market_manager.set_handler(&strategy_handler);
 
     // Create ITCH handler
@@ -405,8 +584,6 @@ int main(int argc, char* argv[]) {
 
     std::cout << "========================================" << std::endl;
 
-    const std::string results_dir = "results";
-
     // ---- Market impact snapshots (HFT) ----
     std::cout << "\n";
     impact_collector.write_summary(std::cout);
@@ -428,6 +605,11 @@ int main(int argc, char* argv[]) {
               << "/latency_*.csv and throughput_*.csv\n";
 
     // Cleanup
+    if (trade_logger) {
+        trade_logger->flush();
+        std::cout << "Wrote " << trade_log_path << "\n";
+        delete trade_logger;
+    }
     if (market_maker) {
         delete market_maker;
     }

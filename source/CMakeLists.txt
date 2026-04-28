@@ -16,6 +16,9 @@ target_link_libraries(gpu_benchmark PRIVATE core)
 add_executable(risk_validation_benchmark gpu/risk_validation_benchmark.cpp)
 target_link_libraries(risk_validation_benchmark PRIVATE core)
 
+add_executable(cpu_profiler gpu/cpu_profiler.cpp)
+target_link_libraries(cpu_profiler PRIVATE core)
+
 message(STATUS "HFT engine executables configured")
 message(STATUS "  - hft_engine: ITCH processor")
 message(STATUS "  - hft_strategy: Strategy mode with market maker")

@@ -321,6 +321,14 @@ public:
     }
 
     /**
+     * Get the order ID assigned by the most recent add_order() call.
+     * Used by strategy handlers to register resting quotes for passive-fill tracking.
+     */
+    uint64_t get_last_order_id() const {
+        return next_order_id_ - 1;
+    }
+
+    /**
      * Reset order ID counter (for testing/determinism)
      */
     void reset_order_id_counter() {

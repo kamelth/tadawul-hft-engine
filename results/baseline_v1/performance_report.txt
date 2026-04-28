@@ -3,18 +3,17 @@ HFT Engine - Performance Report
 ========================================
 
 Wall-clock latency (nanoseconds):
-  ITCH msg total        count=     5000000  min=       0ns  mean=     793ns  p50=      64ns  p95=       64ns  p99=      128ns  p99.9=    262144ns  max=2021500ns
-  Strategy decide       count=       41320  min=     542ns  mean=   92587ns  p50=  131072ns  p95=   262144ns  p99=   262144ns  p99.9=    524288ns  max=2019375ns
+  ITCH msg total        count=          20  min=       0ns  mean=      56ns  p50=      64ns  p95=      512ns  p99=      512ns  p99.9=       512ns  max=375ns
+  Strategy decide       count=           0  min=       0ns  mean=       0ns  p50=       0ns  p95=        0ns  p99=        0ns  p99.9=         0ns  max=0ns
 
 Throughput:
-  ITCH messages   :        5000000  rate=1178527 msgs/s
-  Book events     :         197705  rate=46600 evts/s
-  Strategy quotes :          37688  rate=8883 quotes/s
+  ITCH messages   :             20  rate=16513 msgs/s
+  Book events     :              0  rate=0 evts/s
+  Strategy quotes :              0  rate=0 quotes/s
 
 ITCH timestamp range (market time, nanoseconds since midnight):
-  first = 14400007694888
-  last  = 25050815960652
-  span  = 2.959 h of market time
+  first = 0
+  last  = 0
 
 Notes:
   * Latencies are wall-clock (std::chrono::steady_clock).
