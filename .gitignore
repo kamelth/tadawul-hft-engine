@@ -30,10 +30,21 @@ __pycache__/
 *$py.class
 *.pyc
 
-# Results (optional - you may want to commit some results)
-# results/*.csv
-# results/*.txt
-# results/*.png
+# Docs — ignore everything except .pdf, .tex, .bib, and figures/
+docs/*
+!docs/*.pdf
+!docs/*.tex
+!docs/*.bib
+!docs/figures/
+!docs/figures/**
+
+# Results — ignore large snapshots, logs, plots; keep small benchmark data
+results/baseline_snapshots.csv
+results/hft_snapshots.csv
+results/v2_15symbols/
+results/v2_adaptive/
+results/*.log
+results/*.png
 
 # Large data files (already have ITCH file)
 *.gz

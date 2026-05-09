@@ -30,6 +30,7 @@ struct MarketSnapshot {
     size_t   bid_levels;       // Number of bid price levels
     size_t   ask_levels;       // Number of ask price levels
     size_t   total_orders;     // Total orders in book
+    double   relative_spread_bps; // spread / mid × 10000 (basis points)
 };
 
 /**
@@ -43,6 +44,9 @@ struct MarketQualitySummary {
     double median_spread = 0.0;
     uint64_t min_spread = 0;
     uint64_t max_spread = 0;
+
+    // Relative spread (basis points)
+    double avg_relative_spread_bps = 0.0;
 
     // Depth statistics
     double avg_bid_volume = 0.0;
@@ -118,7 +122,7 @@ public:
             return;
         }
 
-        f << "timestamp_ns,symbol,best_bid,best_ask,spread,"
+        f << "timestamp_ns,symbol,best_bid,best_ask,spread,relative_spread_bps,"
              "bid_volume,ask_volume,bid_levels,ask_levels,total_orders\n";
 
         for (const auto& s : snapshots_) {
@@ -127,6 +131,7 @@ public:
               << s.best_bid << ","
               << s.best_ask << ","
               << s.spread << ","
+              << s.relative_spread_bps << ","
               << s.bid_volume << ","
               << s.ask_volume << ","
               << s.bid_levels << ","
@@ -148,6 +153,7 @@ public:
         // Only consider snapshots with valid bid AND ask (non-zero)
         std::vector<uint64_t> spreads;
         double sum_spread = 0;
+        double sum_rel_bps = 0;
         double sum_bid_vol = 0, sum_ask_vol = 0;
         double sum_bid_lev = 0, sum_ask_lev = 0;
         double sum_orders = 0;
@@ -157,6 +163,7 @@ public:
             if (s.best_bid == 0 || s.best_ask == 0) continue;
             spreads.push_back(s.spread);
             sum_spread += s.spread;
+            sum_rel_bps += s.relative_spread_bps;
             sum_bid_vol += s.bid_volume;
             sum_ask_vol += s.ask_volume;
             sum_bid_lev += s.bid_levels;
@@ -171,6 +178,7 @@ public:
 
         summary.sample_count = n;
         summary.avg_spread = sum_spread / n;
+        summary.avg_relative_spread_bps = sum_rel_bps / n;
         summary.min_spread = min_spread;
         summary.max_spread = max_spread;
         summary.avg_bid_volume = sum_bid_vol / n;
@@ -194,6 +202,7 @@ public:
         os << std::string(50, '-') << "\n";
         os << std::fixed << std::setprecision(4);
         os << "  Avg spread:       $" << (s.avg_spread / 10000.0) << "\n";
+        os << "  Avg relative:     " << s.avg_relative_spread_bps << " bps\n";
         os << "  Median spread:    $" << (s.median_spread / 10000.0) << "\n";
         os << "  Min spread:       $" << (s.min_spread / 10000.0) << "\n";
         os << "  Max spread:       $" << (s.max_spread / 10000.0) << "\n";
@@ -220,6 +229,10 @@ private:
             if (!book) continue;
 
             Matching::OrderBookStats stats = book->get_stats();
+            uint64_t mid = (stats.best_bid_price + stats.best_ask_price) / 2;
+            double rel_bps = (mid > 0)
+                ? (static_cast<double>(stats.spread) * 10000.0) / mid
+                : 0.0;
             snapshots_.push_back({
                 timestamp_ns,
                 sym.symbol_id,
@@ -231,7 +244,8 @@ private:
                 stats.best_ask_volume,
                 stats.bid_level_count,
                 stats.ask_level_count,
-                stats.total_orders
+                stats.total_orders,
+                rel_bps
             });
         }
     }

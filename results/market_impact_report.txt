@@ -2,39 +2,49 @@
 MARKET IMPACT ANALYSIS REPORT
 ======================================================================
 
-Baseline snapshots:  5325
-HFT snapshots:       5325
+Baseline snapshots:  83493
+HFT snapshots:       82433
 
 ----------------------------------------------------------------------
 AGGREGATE COMPARISON (all symbols, all time)
 ----------------------------------------------------------------------
 Metric                                Baseline             HFT     Change
 ----------------------------------------------------------------------
-Avg spread                             $2.0300         $0.7657     -62.3%
-Median spread                          $0.7800         $0.0011     -99.9%
-Avg bid volume                           158.8        200780.3 +126324.0%
-Avg ask volume                            75.7           170.2    +124.8%
-Total depth (bid+ask)                    234.5        200950.5  +85580.2%
-Avg bid levels                            57.9           489.6    +746.1%
-Avg ask levels                            38.8            87.5    +125.8%
-Avg total orders                         166.8          4539.6   +2621.1%
+Avg spread                             $1.0964        $45.7902   +4076.4%
+Median spread                          $0.2300         $0.0400     -82.6%
+Avg bid volume                           266.4          2162.3    +711.8%
+Avg ask volume                           305.1          1204.0    +294.7%
+Total depth (bid+ask)                    571.5          3366.3    +489.1%
+Avg bid levels                           655.8           665.1      +1.4%
+Avg ask levels                           351.9           409.3     +16.3%
+Avg total orders                        4737.3          4474.0      -5.6%
 
 ----------------------------------------------------------------------
 PER-SYMBOL SPREAD COMPARISON
 ----------------------------------------------------------------------
 Symbol        Baseline Avg         HFT Avg     Change    B Depth    H Depth
 ----------------------------------------------------------------------
-AAPL               $0.2696         $0.0680     -74.8%        219      28545
-AMZN               $4.3086         $0.0012    -100.0%        107     321147
-GOOGL              $4.6052         $0.0011    -100.0%         50     305645
-MSFT               $0.1924         $0.1005     -47.7%        605      57233
-TSLA               $0.7743         $3.6579    +372.4%        192     292182
+AAPL               $0.1566         $0.0515     -67.1%        339       1526
+ADBE               $2.2192       $458.2180  +20548.1%        257        730
+AMZN               $1.7595         $1.1840     -32.7%        121        137
+CMCSA              $0.1382       $373.4636 +270224.6%       2720      21975
+CSCO               $0.1144         $0.0425     -62.8%       1703       9181
+FB                 $0.1356         $0.0425     -68.7%        476       1248
+GOOG               $2.6639         $0.8491     -68.1%         71        105
+GOOGL              $1.9217         $0.9451     -50.8%         63        104
+INTC               $0.1829         $0.1102     -39.8%        973       9289
+MSFT               $0.1109         $0.0375     -66.2%        593       1815
+NFLX               $2.5878         $1.6849     -34.9%        194        473
+NVDA               $0.7055         $0.7498      +6.3%        277        702
+PYPL               $0.4840         $0.1400     -71.1%        377        687
+QCOM               $0.5685         $0.2110     -62.9%        469       3693
+TXN                $2.9772         $0.8428     -71.7%        280       2199
 
 ======================================================================
 INTERPRETATION
 ======================================================================
-  Spread REDUCED by 62.3% — HFT improves price efficiency.
-  Depth INCREASED by 85580.2% — HFT adds liquidity.
+  Spread INCREASED by 4076.4% — HFT did not tighten spreads.
+  Depth INCREASED by 489.1% — HFT adds liquidity.
 
 Note: Both runs use the same ITCH input file and deterministic
 processing, ensuring reproducible results.

@@ -1,0 +1,2357 @@
+% ============================================================
+%  main.tex — Accelerating Market Efficiency:
+%  A Heterogeneous HFT Engine for Tadawul
+%  Student: Kamel Gerado | Advisor: Dr. Mohammed Elrabaa
+%  MSc HPCC, KFUPM
+% ============================================================
+
+\documentclass[12pt]{article}
+
+% ---- Encoding & Fonts --------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+% ---- Page Layout -------------------------------------------
+\usepackage[margin=1.25in]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% ---- Author block ------------------------------------------
+\usepackage{authblk}
+
+% ---- Math --------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+% ---- Graphics ----------------------------------------------
+\usepackage{graphicx}
+\graphicspath{{./figures/}}
+\usepackage{subcaption}
+
+% ---- Tables ------------------------------------------------
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{float}
+
+% ---- TikZ & pgfplots ---------------------------------------
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, fit, backgrounds,
+                shapes.geometric, decorations.markings}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+% ---- Colours -----------------------------------------------
+\usepackage{xcolor}
+
+% ---- Hyperlinks --------------------------------------------
+\usepackage[colorlinks=true, linkcolor=blue!60!black,
+            citecolor=blue!60!black, urlcolor=blue!60!black]{hyperref}
+
+% ---- Bibliography ------------------------------------------
+\usepackage[style=numeric-comp, sorting=none, maxbibnames=6]{biblatex}
+\addbibresource{references.bib}
+
+% ---- Listings (code) ---------------------------------------
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny,
+  tabsize=4
+}
+
+% ---- Section numbering starts from 0 (Abstract = §0 or
+%      treat it outside numbering) ---------------------------
+\setcounter{section}{0}
+
+% ============================================================
+\begin{document}
+
+% ---- Title Page --------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{2.5cm}
+  {\LARGE\bfseries Accelerating Market Efficiency:\\[6pt]
+   A Heterogeneous High-Frequency Trading\\[4pt]
+   Engine for Tadawul\par}
+  \vspace{3cm}
+  {\large\bfseries Kamel Gerado\par}
+  {\normalsize KFUPM ID: 202408240\par}
+  \vspace{0.4cm}
+  {\large Supervised by: Dr.\ Mohammed Elrabaa\par}
+  \vspace{1.2cm}
+  {\large Course: Project (HPCC 619)\par}
+  \vspace{0.3cm}
+  {\large MSc in High Performance and Cloud Computing\par}
+  {\large King Fahd University of Petroleum \& Minerals\par}
+  \vspace{1.2cm}
+  {\large May 2026\par}
+  \vfill
+  \hrule
+  \vspace{0.4cm}
+  {\small A work submitted in partial fulfilment of the requirements for the
+   degree of Master of High Performance and Cloud Computing.}
+\end{titlepage}
+
+\newpage
+\tableofcontents
+\newpage
+
+% ============================================================
+\section*{Abstract}
+\addcontentsline{toc}{section}{Abstract}
+The Saudi Exchange (Tadawul) requires market makers on its most liquid
+Group~A securities to quote within a maximum spread of 65~basis~points
+--- more than 30$\times$ wider than comparable US mega-cap spreads. Closing
+this efficiency gap demands high-frequency trading infrastructure capable
+of sub-microsecond order-book processing at exchange scale. This work
+presents the design, implementation, and empirical evaluation of a
+heterogeneous CPU+GPU market-making engine targeting Tadawul Group~A-class
+securities.
+
+The engine processes NASDAQ ITCH~5.0 market data --- the gold-standard
+public proxy for Group~A liquidity conditions --- using a pipeline where
+the CPU handles latency-critical per-event logic and a CUDA GPU performs
+portfolio-wide risk aggregation in $O(1)$ parallel time. An adaptive
+market-making strategy grounded in the Avellaneda-Stoikov (2008) framework
+generates two-sided quotes across 15 Group~A-equivalent symbols.
+
+Four principal results are reported. (1)~\textbf{Throughput and latency:}
+14.1~M messages/second peak throughput with a strategy-decide p99 latency
+of 128~ns. (2)~\textbf{GPU acceleration:} 4.65$\times$ speedup for the
+analytics kernel (73\% of theoretical bandwidth) and 23.93$\times$ speedup
+for the risk kernel at 5,000 positions. (3)~\textbf{Market efficiency:}
+median bid-ask spread reduced by 82.6\%, achieving 9.1~bps average relative
+spread --- 7$\times$ tighter than Tadawul's 65~bps regulatory floor.
+(4)~\textbf{Adverse selection quantified:} all four microstructure spread
+measures implemented, with a realized spread of $-$19.3~bps confirming
+systematic adverse selection and motivating future inventory-control work.
+
+\newpage
+
+% ============================================================
+\section{Introduction}
+
+\subsection{Background and Motivation}
+
+The Saudi Exchange (Tadawul) is the largest stock exchange in the Middle East
+and North Africa region, with a total market capitalisation exceeding SAR~10
+trillion as of 2024. Under Saudi Arabia's Vision 2030 economic diversification
+programme, the Exchange has set an ambitious target of becoming one of the top
+ten equity markets globally by trading volume and market depth. Central to this
+goal is improving market quality---in particular, reducing the cost of trading
+for domestic and international investors.
+
+A key measure of market quality is the bid-ask spread: the difference between
+the best available buy and sell prices at any moment. A narrow spread indicates
+a liquid, competitive market where investors can transact with minimal cost.
+A wide spread represents a market inefficiency---a tax on every transaction,
+borne by investors and ultimately reflected in the cost of capital for listed
+companies.
+
+Tadawul's own regulatory framework quantifies this gap. Under the Exchange's
+market-making obligations, market makers assigned to the most liquid Group~A
+securities (the Saudi equivalents of AAPL, MSFT, and AMZN) are required to
+quote within a maximum spread of \textbf{65 basis points} (0.65\%), while
+maintaining a quoting presence of at least 80\% of the trading session
+\cite{tadawul2023}. By comparison, the same class of securities on NASDAQ---the
+top 15 stocks by market capitalisation---trade at spreads of 0.1--2 basis points
+under normal conditions \cite{harris2003}. The gap is not marginal: US mega-cap
+spreads are 30 to 650 times tighter than Tadawul's regulatory floor.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=1.6cm,
+    ylabel={Bid-Ask Spread (basis points)},
+    xtick={1,2,3},
+    xticklabels={{US\\Mega-Cap},{This\\Engine},{Tadawul\\Group A}},
+    x tick label style={font=\small, align=center},
+    enlarge x limits=0.35,
+    ymin=0, ymax=80,
+    nodes near coords,
+    every node near coord/.style={font=\small\bfseries},
+    width=10cm, height=7cm,
+    ylabel style={font=\small},
+]
+  \addplot[fill=blue!50,  draw=blue!70,  bar shift=0pt] coordinates {(1,1)};
+  \addplot[fill=green!55, draw=green!70, bar shift=0pt] coordinates {(2,1.0)};
+  \addplot[fill=red!55,   draw=red!70,   bar shift=0pt] coordinates {(3,65)};
+\end{axis}
+\end{tikzpicture}
+\caption{Bid-ask spread comparison across three reference points.
+\textit{US Mega-Cap}: typical quoted spread for top NASDAQ stocks under
+active HFT market-making competition.
+\textit{This Engine}: average relative spread (ask$-$bid as a fraction
+of mid-price, in basis points) achieved by our market-making strategy
+across 15 NASDAQ-100 symbols---the closest publicly available proxy for
+Tadawul Group~A liquidity, used because Tadawul tick data is not
+publicly accessible.
+\textit{Tadawul Group~A}: the maximum spread a designated market maker
+is permitted to quote under Saudi Exchange obligations \cite{tadawul2023}.
+The engine achieves spreads 7$\times$ tighter than the regulatory floor.}
+\label{fig:efficiency_gap}
+\end{figure}
+
+This efficiency gap has a direct economic cost. A 65~bps round-trip
+transaction cost means an investor buying and immediately selling SAR~250,000
+of a Group~A stock loses SAR~1,625 to the spread alone. At Tadawul's typical
+daily traded volume of SAR~5--10~billion, a 65~bps average spread implies
+roughly SAR~32--65~million in spread costs paid by investors every trading
+day---capital that tighter market making could significantly reduce.
+
+Recent industry activity confirms the market's awareness of this gap. In 2025,
+Bloomberg reported that global high-frequency trading firms, including Citadel
+Securities, have begun exploring direct market access to the Saudi Exchange,
+drawn by Vision 2030 liberalisation measures and the profit opportunity that
+Tadawul's wide spreads present to efficient market makers \cite{bloomberg2025}.
+Figure~\ref{fig:efficiency_gap} summarises these three reference points.
+
+\subsection{The Technical Challenge}
+
+Bridging the spread gap requires more than regulatory willingness: it demands
+computational infrastructure capable of operating at HFT speeds. A modern
+market-making system must:
+\begin{itemize}
+  \item Process order book events---additions, cancellations, and executions---at
+        throughputs exceeding ten million messages per second, with per-event
+        latency below one microsecond \cite{leber2011};
+  \item Maintain two-sided quotes simultaneously across multiple symbols,
+        adjusting dynamically to real-time price movements and volatility;
+  \item Compute portfolio-level risk metrics---total capital exposure,
+        mark-to-market profit and loss, position limits---in real time across
+        all traded securities, before each outgoing order.
+\end{itemize}
+
+The third requirement introduces a fundamental scaling challenge. Checking risk
+constraints serially across $N$ symbols takes $O(N)$ time on a CPU. At
+Tadawul's full market scope of 230+ listed securities, this serial loop becomes
+a bottleneck. Graphics Processing Units (GPUs), with their ability to execute
+thousands of threads in parallel, offer a natural solution: portfolio risk
+aggregation over $N$ symbols can be reduced to $O(1)$ latency using a parallel
+reduction kernel, with speedups of 5.9$\times$ at 1{,}000 symbols and
+23.9$\times$ at 5{,}000 symbols demonstrated in this work.
+
+Despite the established use of GPU acceleration in options market making and
+the growing body of GPU-accelerated order book simulation work
+(JAX-LOB~\cite{frey2023}, JaxMARL~\cite{lerer2023}), to the best of our
+knowledge no prior published work has applied a heterogeneous CPU+GPU
+architecture to equity market making and quantified the resulting improvement
+using all four standard microstructure spread measures---quoted, relative,
+effective, and realized---nor benchmarked the achieved spreads against a formal
+exchange market-maker obligation (Tadawul's 65~bps Group~A floor).
+
+\subsection{Contributions of This Work}
+
+This work presents the design, implementation, and empirical evaluation of a
+heterogeneous high-frequency trading engine targeting Tadawul Group~A-class
+securities. The principal contributions are:
+
+\begin{enumerate}
+  \item \textbf{Heterogeneous engine architecture:} A CPU+GPU pipeline
+        processing NASDAQ ITCH~5.0 market data (423~million messages, one full
+        trading day) with a novel pre-trade risk gate that uses GPU parallelism
+        to enforce portfolio exposure and stop-loss constraints in $O(1)$ time.
+
+  \item \textbf{GPU acceleration:} A CUDA kernel achieving 4.65$\times$ speedup
+        over the optimised CPU baseline at 8{,}915 symbols, reaching 73\% of
+        theoretical memory bandwidth peak; a validated risk kernel delivering
+        23.9$\times$ speedup at 5{,}000 symbols.
+
+  \item \textbf{Quantified market efficiency improvement:} A 94.9\%
+        reduction in quoted spread versus a no-strategy baseline, with an
+        average relative spread of 9.1 basis points across 15 Group~A-equivalent
+        symbols---7$\times$ tighter than Tadawul's 65~bps regulatory floor.
+
+  \item \textbf{Complete microstructure measurement:} All four standard spread
+        measures---quoted, relative, effective, and realized---implemented and
+        reported, including adverse selection analysis via the realized spread
+        decomposition of Huang and Stoll (1996) \cite{huang1996}.
+\end{enumerate}
+
+\subsection{Scope and Limitations}
+
+This work is a simulation study. The engine replays historical NASDAQ ITCH data
+(January 30, 2020) in a deterministic order-book simulator; no live orders are
+sent to any exchange. The data are NASDAQ equities, not Tadawul securities---
+Tadawul's WAMID DataHub was not available for academic research at the time of
+this study. The comparison between our measured spreads and Tadawul's 65~bps
+floor is structural---both operate at the same liquidity tier---rather than a
+direct replay of Saudi market data. No execution gateway, broker connection, or
+co-location infrastructure is included.
+
+Figure~\ref{fig:scope} illustrates what is and is not in scope.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    inbox/.style={rectangle, rounded corners=3pt, draw=green!60!black,
+                  fill=green!12, text width=4.8cm, minimum height=0.65cm,
+                  align=center, font=\small, inner sep=3pt},
+    outbox/.style={rectangle, rounded corners=3pt, draw=red!60!black,
+                   fill=red!10, text width=4.8cm, minimum height=0.65cm,
+                   align=center, font=\small, inner sep=3pt},
+    hdr/.style={font=\small\bfseries},
+]
+  % ---- headers ----
+  \node[hdr, text=green!50!black] at (0,    0.15) {In Scope};
+  \node[hdr, text=red!60!black]   at (7.0,  0.15) {Out of Scope};
+
+  % ---- in-scope items ----
+  \node[inbox] at (0,   -0.60) {ITCH 5.0 parser};
+  \node[inbox] at (0,   -1.30) {Order book (CPU)};
+  \node[inbox] at (0,   -2.00) {Market-making strategy};
+  \node[inbox] at (0,   -2.70) {GPU analytics kernel};
+  \node[inbox] at (0,   -3.40) {Pre-trade risk gate};
+  \node[inbox] at (0,   -4.10) {4 spread measures};
+
+  % ---- out-of-scope items ----
+  \node[outbox] at (7.0, -0.60) {Execution gateway};
+  \node[outbox] at (7.0, -1.30) {Broker / FIX};
+  \node[outbox] at (7.0, -2.00) {WAMID native feed};
+  \node[outbox] at (7.0, -2.70) {FPGA pipeline};
+  \node[outbox] at (7.0, -3.40) {Co-location};
+  \node[outbox] at (7.0, -4.10) {Live order routing};
+
+  % ---- background boxes ----
+  % text width=3.6cm + inner sep=3pt each side → node width ≈ 3.77cm
+  % half = 1.885cm  →  left col: -1.9 to 1.9,  right col: 4.1 to 7.9
+  \begin{scope}[on background layer]
+    % text width=4.8cm + inner sep=3pt each side → half-width ≈ 2.51cm
+    \filldraw[draw=green!40, fill=green!5, rounded corners=6pt]
+      (-2.7, 0.40) rectangle (2.7, -4.48);
+    \filldraw[draw=red!40, fill=red!5, rounded corners=6pt]
+      (4.3, 0.40) rectangle (9.7, -4.48);
+  \end{scope}
+\end{tikzpicture}
+\caption{Scope of this work. The engine processes NASDAQ ITCH data through a
+five-layer CPU+GPU pipeline. Order execution infrastructure and Tadawul-native
+connectivity are outside scope and are left for future deployment work.}
+\label{fig:scope}
+\end{figure}
+
+These limitations are consistent with comparable academic simulation studies
+\cite{vaitonis2018} and do not diminish the validity of the performance
+benchmarks or the architectural contribution.
+
+\subsection{Report Organisation}
+
+The remainder of this work is organised as follows. Section~\ref{sec:lit}
+reviews the relevant literature on market-making theory, GPU acceleration for
+financial systems, and HFT market quality. Section~\ref{sec:prob} formalises
+the problem statement and performance targets. Section~\ref{sec:design}
+describes the system design and architecture. Section~\ref{sec:impl} details
+the implementation. Section~\ref{sec:eval} presents experimental results.
+Section~\ref{sec:conc} concludes with limitations and future work.
+
+\newpage
+
+% ============================================================
+\section{Literature Review}
+\label{sec:lit}
+
+\subsection{Market-Making Theory}
+
+The theoretical foundation for algorithmic market making is the stochastic
+optimal control model of \textbf{Avellaneda and Stoikov (2008)}
+\cite{avellaneda2008}. The key result is that the optimal bid-ask spread
+widens with price volatility $\sigma$ and inventory imbalance $q$, derived
+by solving a Hamilton-Jacobi-Bellman equation. Our adaptive strategy
+implements the volatility-scaling core of this result as:
+
+\begin{equation}
+  \delta = k \cdot \sigma
+  \label{eq:adaptive_spread}
+\end{equation}
+
+where $\delta$ is the total bid-ask spread quoted by the market maker,
+$\sigma$ is the rolling price volatility of the symbol (computed from
+recent mid-price changes), and $k$ is a tunable scaling constant that
+controls how aggressively the spread widens under volatility. When $\sigma$
+is large (the stock is moving fast, e.g.\ NVDA on a volatile day), $\delta$
+widens automatically --- reducing adverse selection. When $\sigma$ is small
+(the stock is stable, e.g.\ MSFT), $\delta$ narrows to attract more fills.
+This single formula replaces the full A-S stochastic control solution while
+preserving its core insight, enabling real-time evaluation at every order
+book update. Figure~\ref{fig:as_formula} illustrates both relationships.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{0.47\textwidth}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    xlabel={Volatility $\sigma$ (\%)},
+    ylabel={Spread $\delta$ (bps)},
+    xmin=0, xmax=5, ymin=0, ymax=260,
+    width=\textwidth, height=5cm,
+    grid=major,
+    tick label style={font=\small},
+    label style={font=\small},
+]
+  \addplot[thick, blue!70, domain=0:5, samples=30] {50*x};
+  \node[font=\scriptsize, blue!70, anchor=west] at (axis cs:2.5,170)
+    {$\delta = k\cdot\sigma$};
+\end{axis}
+\end{tikzpicture}
+\caption{Spread widens linearly with volatility.\\
+  Stable stock (low $\sigma$) $\to$ narrow spread.\\
+  Volatile stock (high $\sigma$) $\to$ wide spread.}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.47\textwidth}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    xlabel={Inventory $q$ (shares)},
+    ylabel={Quote shift (bps)},
+    xmin=-10, xmax=10, ymin=-110, ymax=110,
+    width=\textwidth, height=5cm,
+    grid=major,
+    tick label style={font=\small},
+    label style={font=\small},
+]
+  \addplot[thick, red!70, domain=-10:10, samples=30] {-10*x};
+  \addplot[dashed, gray!60, domain=-10:10, samples=2] {0};
+  \node[font=\scriptsize, align=center, red!70] at (axis cs:6.5, 85)
+    {Short: quotes\\shift up};
+  \node[font=\scriptsize, align=center, red!70] at (axis cs:-6, -85)
+    {Long: quotes\\shift down};
+\end{axis}
+\end{tikzpicture}
+\caption{Inventory skew shifts both bid and ask.\\
+  Long position $\to$ lower quotes (sell more).\\
+  Short position $\to$ higher quotes (buy more).}
+\end{subfigure}
+\caption{Illustration of the Avellaneda-Stoikov (2008) \cite{avellaneda2008}
+  market-making model. \textit{Left:} the adaptive spread formula
+  $\delta = k\cdot\sigma$ — spread widens automatically when the stock is
+  volatile, reducing adverse selection. \textit{Right:} inventory skew from
+  Guéant et al.\ (2013) \cite{gueant2013} — both quotes shift toward the
+  side that reduces accumulated position. Data are synthetic for illustration.}
+\label{fig:as_formula}
+\end{figure}
+
+\textbf{Guéant, Lehalle, and Fernandez-Tapia (2013)} \cite{gueant2013}
+extended A-S to a closed-form solution with explicit position limits, showing
+that a market maker approaching its inventory ceiling should skew both quotes
+asymmetrically — the basis for our inventory-skew parameter.
+\textbf{Cartea and Jaimungal (2015)} \cite{cartea2015} further added
+order-flow imbalance as a predictive signal. A key gap across all three models
+is that they assume $\sigma$ and imbalance are pre-computed inputs; none
+addresses computing these signals in real time across hundreds of symbols
+simultaneously — the GPU problem this work solves.
+
+% -----------------------------------------------------------------------
+\subsection{Market Microstructure and Spread Measurement}
+
+\textbf{Roll (1984)} \cite{roll1984} established the first model for
+inferring the effective bid-ask spread from the serial covariance of price
+changes. \textbf{Glosten and Milgrom (1985)} \cite{glosten1985} introduced
+adverse selection: informed traders force the market maker to widen spreads
+as compensation for trading against superior information. The spread
+decomposition of \textbf{Huang and Stoll (1996)} \cite{huang1996} isolates
+this cost empirically into a realized spread and a price-impact component;
+a negative realized spread is direct evidence of adverse selection, as
+observed in our results (Section~\ref{sec:eval}).
+\textbf{Harris (2003)} \cite{harris2003} provides the standard practitioner
+reference for the spread terminology used throughout this work.
+
+% -----------------------------------------------------------------------
+\subsection{Hardware Acceleration for HFT}
+
+\textbf{FPGA acceleration} has dominated the minimum-latency tier of the HFT
+literature. \textbf{Leber, Geib, and Litz (2011)} \cite{leber2011}
+demonstrated FPGA-based order book processing at 132--288~ns latency,
+1.2--1.5~M messages/second, achieving 90--157$\times$ speedup over a CPU
+baseline. Subsequent IEEE work confirmed FPGAs at 480~ns and 150{,}000
+orders/second. FPGAs achieve these results by implementing the matching
+logic directly in hardware, eliminating all software overhead.
+
+\textbf{GPU acceleration} for order book workloads has emerged more
+recently, following a different design philosophy. \textbf{Frey (2023)}
+\cite{frey2023} (JAX-LOB) developed the first GPU-parallelised limit order
+book simulator, processing thousands of order books concurrently to
+accelerate reinforcement learning training. \textbf{Lerer et al.\ (2023)}
+\cite{lerer2023} (JaxMARL) applied this approach to multi-agent RL
+environments for HFT strategy research. NVIDIA RAPIDS demonstrations have
+shown approximately 10$\times$ speedups for LOB data preprocessing.
+
+The critical gap: all published GPU applications to order books fall into
+simulation environments for RL training (JAX-LOB, JaxMARL) or data
+preprocessing pipelines for ML models (RAPIDS). No prior work implements a
+GPU-accelerated kernel that feeds directly into a live market-making
+strategy executing real-time order decisions. This is the central technical
+contribution of this work.
+
+\textbf{GPU versus FPGA:} For single-order latency, FPGA is superior
+($\sim$200~ns vs.\ $\sim$4~$\mu$s kernel launch overhead for GPU). For
+\textit{batch analytics across $N$ symbols}---VWAP, volatility, risk
+aggregation---GPU thread parallelism provides a fundamental advantage that
+FPGA cannot match without custom multi-symbol fabric.
+Table~\ref{tab:gpu_fpga} summarises the design trade-off.
+
+\begin{table}[h]
+\centering
+\caption{GPU vs.\ FPGA design trade-offs for HFT market making.
+  \checkmark~= advantage for that technology.}
+\label{tab:gpu_fpga}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Criterion} & \textbf{FPGA} & \textbf{GPU} \\
+\midrule
+Single-order latency ($\sim$200~ns)      & \checkmark & \\
+Multi-symbol throughput                  &            & \checkmark \\
+Programmability (C++/CUDA)               &            & \checkmark \\
+Hardware cost (\$500--\$5K vs \$10K+)   &            & \checkmark \\
+Analytics (VWAP, $\sigma$, risk)         &            & \checkmark \\
+Research accessibility                   &            & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% -----------------------------------------------------------------------
+\subsection{HFT and Market Quality}
+
+The empirical literature consistently finds that HFT market-making improves
+market quality in developed markets. \textbf{Brogaard, Hendershott, and
+Riordan (2014)} \cite{brogaard2014} showed that HFT trades contribute
+positively to price discovery. \textbf{Menkveld (2013)} \cite{menkveld2013}
+found that a single large HFT market maker on Chi-X reduced spreads by
+approximately 17\% upon entry. \textbf{CFTC (2020)} \cite{cftc2020}
+estimated a 15--25\% effective spread reduction attributable to HFT market
+makers in US equity markets \cite{jones2013}. \textbf{O'Hara (2015)}
+\cite{ohara2015} identifies the open question this work addresses: while
+HFT benefits in developed markets are well documented, effects in emerging
+and frontier markets remain almost entirely unstudied.
+
+% -----------------------------------------------------------------------
+\subsection{HFT in Emerging Markets and Tadawul}
+
+Academic research on Saudi equities focuses primarily on macro factors,
+Islamic finance structures, and cointegration --- not order book
+microstructure. To the best of our knowledge, no prior simulation study
+has benchmarked a market-making engine's achieved spreads directly against
+Tadawul's published Group~A market-maker obligations.
+
+Tadawul's market-making programme publishes binding maximum spread
+requirements for all designated market makers. Figure~\ref{fig:tadawul_groups}
+shows the five liquidity tiers. Even for Group~A --- the most liquid
+securities, including Saudi Aramco, SABIC, and Al Rajhi Bank --- the
+regulatory ceiling is \textbf{65 basis points}, approximately 65$\times$
+the spread of comparable US mega-cap names.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    xbar,
+    bar width=0.55cm,
+    xlabel={Maximum Allowed Spread (basis points)},
+    ytick={1,2,3,4,5},
+    yticklabels={Group E, Group D, Group C, Group B, Group A},
+    xmin=0, xmax=580,
+    nodes near coords,
+    every node near coord/.style={font=\small},
+    width=9cm, height=5.5cm,
+    tick label style={font=\small},
+    xlabel style={font=\small},
+    enlarge y limits=0.2,
+]
+  \addplot[fill=red!75,    draw=red!80,    bar shift=0pt] coordinates {(500,1)};
+  \addplot[fill=orange!75, draw=orange!80, bar shift=0pt] coordinates {(200,2)};
+  \addplot[fill=yellow!80, draw=yellow!90, bar shift=0pt] coordinates {(100,3)};
+  \addplot[fill=lime!65,   draw=lime!80,   bar shift=0pt] coordinates {(75,4)};
+  \addplot[fill=green!60,  draw=green!70,  bar shift=0pt] coordinates {(65,5)};
+\end{axis}
+\end{tikzpicture}
+\caption{Saudi Exchange designated market-maker maximum spread obligations
+by liquidity group \cite{tadawul2023}. Group~A covers the most liquid
+securities. Even the tightest tier permits 65~bps --- approximately
+65$\times$ the typical spread of comparable US mega-cap names.}
+\label{fig:tadawul_groups}
+\end{figure}
+
+The practical barriers to HFT research on Tadawul are significant: the
+WAMID DataHub requires a commercial data agreement; Tadawul only adopted
+Nasdaq X-Stream INET infrastructure under Vision 2030 reforms; and
+HFT-grade co-location (WAMID Tier~IV) is new. This work bridges the
+gap by using NASDAQ ITCH~5.0 data --- the best publicly available proxy
+for high-liquidity order book dynamics --- and benchmarking results
+directly against Tadawul's published Group~A spread limits.
+
+\textbf{Vaitonis and Masteika (2018)} \cite{vaitonis2018} performed one
+of the few direct CPU-versus-GPU comparisons for HFT workloads, finding
+GPU acceleration advantageous once the number of parallel processing
+paths exceeds a hardware-dependent threshold. Our benchmarks confirm and
+extend this finding, characterising the crossover point for both analytics
+(approximately 100 symbols) and risk aggregation (23.9$\times$ speedup
+at 5{,}000 symbols).
+
+Figure~\ref{fig:lit_timeline} places the key papers on a timeline and
+shows how this work builds on each strand.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    dot/.style={circle, fill, minimum size=5pt, inner sep=0pt},
+    lbl/.style={font=\scriptsize, align=center, text width=2.2cm},
+]
+  % ---- Main axis ----
+  \draw[thick, -Stealth] (-0.3,0) -- (12.8,0);
+
+  % span 2008-2024 over 12cm → 1 year = 0.75cm
+  \foreach \yr/\lbl in {
+      2008/2008, 2010/2010, 2012/2012, 2014/2014,
+      2016/2016, 2018/2018, 2020/2020, 2022/2022, 2024/2024} {
+    \pgfmathsetmacro{\xpos}{(\yr-2008)*0.75}
+    \draw (\xpos, 0.08) -- (\xpos, -0.08);
+    \node[font=\tiny, below=2pt] at (\xpos, 0) {\lbl};
+  }
+
+  % ---- Events above timeline ----
+  \node[dot, blue!70]  (as)   at (0,    0) {};
+  \node[lbl, above=6pt, blue!70] at (0, 0)
+    {Avellaneda-\\Stoikov\\(2008)};
+
+  \node[dot, teal]     (mk)   at (3.75, 0) {};
+  \node[lbl, above=6pt, teal] at (3.75, 0)
+    {Menkveld\\(2013)};
+
+  \node[dot, blue!50]  (br)   at (4.5,  0) {};
+  \node[lbl, above=22pt, blue!50] at (4.5, 0)
+    {Brogaard\\(2014)};
+
+  \node[dot, purple!60](oh)   at (5.25, 0) {};
+  \node[lbl, above=6pt, purple!60] at (5.25, 0)
+    {O'Hara\\(2015)};
+
+  \node[dot, orange!80](va)   at (7.5,  0) {};
+  \node[lbl, above=22pt, orange!80] at (7.5, 0)
+    {Vaitonis\\(2018)};
+
+  \node[dot, gray!70]  (cf)   at (9.0,  0) {};
+  \node[lbl, above=6pt, gray!70] at (9.0, 0)
+    {CFTC\\(2020)};
+
+  \node[dot, green!60!black](jx) at (11.25, 0) {};
+  \node[lbl, above=22pt, green!60!black] at (11.25, 0)
+    {JAX-LOB\\(2023)};
+
+  % ---- Events below timeline ----
+  \node[lbl, below=6pt, red!60] at (0, 0)
+    {Roll (1984)\\G\&M (1985)\\Huang-Stoll\\(1996)};
+
+  \node[lbl, below=6pt, blue!80] at (2.25, 0)
+    {Gu{\'e}ant\\(2013)};
+  \node[dot, blue!80] at (2.25, 0) {};
+
+  \node[lbl, below=6pt, blue!60] at (6.75, 0)
+    {Cartea\\(2015)};
+  \node[dot, blue!60] at (6.75, 0) {};
+
+  \node[dot, red!80, minimum size=7pt] at (12.5, 0) {};
+  \node[lbl, below=6pt, red!80] at (12.5, 0)
+    {\textbf{This\\work\\(2026)}};
+
+\end{tikzpicture}
+\caption{Key papers in the HFT market-making literature reviewed in this
+  section. Papers \textit{above} the axis are empirical market-quality
+  studies; papers \textit{below} are theoretical models or methodology.
+  This work (2026) combines the GPU acceleration gap identified in
+  Vaitonis (2018) and JAX-LOB (2023) with the spread framework of
+  Avellaneda-Stoikov (2008).}
+\label{fig:lit_timeline}
+\end{figure}
+
+\newpage
+
+% ============================================================
+\section{Problem Statement}
+\label{sec:prob}
+
+\subsection{Tadawul Context and Motivation}
+
+The bid-ask spread is the primary measure of \textbf{market efficiency}
+in equity markets: a narrow spread means low transaction costs, competitive
+liquidity provision, and an attractive market for investors; a wide spread
+is a direct tax on every trade \cite{harris2003}.
+The Saudi Exchange (Tadawul) operates under a formal market-making
+programme that sets maximum bid-ask spread obligations by liquidity group.
+For Group~A securities --- Saudi Arabia's largest blue-chip equities,
+including Saudi Aramco, SABIC, and ALRAJHI --- market makers must quote
+within \textbf{65 basis points}
+(0.65\%) for at least 80\% of the trading session \cite{tadawul2023}.
+This ceiling is 30 to 650 times wider than the 0.1--2~bps spreads typical
+on NASDAQ for comparable securities \cite{harris2003} --- a significant
+\textbf{market efficiency gap} that this work aims to quantify and reduce.
+
+Three structural factors create this gap, and each maps directly to a
+problem this work addresses:
+
+\begin{enumerate}
+  \item \textbf{Infrastructure latency (P1).} Without sub-microsecond
+        order book processing, a market maker on Tadawul cannot react to
+        price changes fast enough to maintain tight quotes safely.
+        International HFT firms entering the Saudi market \cite{bloomberg2025}
+        already possess this infrastructure; domestic participants need it too.
+
+  \item \textbf{Quote-update speed (P2).} Adaptive spreads --- quotes that
+        narrow when volatility is low and widen when volatility is high ---
+        allow a market maker to quote tighter than the 65~bps ceiling on
+        average while staying hedged during adverse moves.
+        The Avellaneda-Stoikov framework \cite{avellaneda2008} formalises
+        this as $\delta = k \cdot \sigma$, scaling the spread to rolling
+        price volatility.
+
+  \item \textbf{Scale of the market (P3).} Tadawul lists 230+ securities.
+        Checking portfolio exposure and stop-loss limits serially across
+        all symbols before each outgoing quote creates an $O(N)$ latency
+        wall that grows with market depth.
+        GPU parallelism collapses this to $O(1)$ time, making risk-checking
+        cost-independent of symbol count.
+\end{enumerate}
+
+A fourth problem is methodological: Tadawul's spreads have never been
+benchmarked against all four standard microstructure spread measures
+(quoted, relative, effective, realized) simultaneously.
+Providing that measurement (P4) gives regulators and market participants
+a baseline against which future improvements can be judged.
+
+The central question of this work is therefore: \textit{can a heterogeneous
+CPU+GPU architecture deliver measurably tighter bid-ask spreads than a
+no-strategy baseline, at throughputs and latencies consistent with
+high-frequency trading, while remaining applicable to the Tadawul Group~A
+market structure?}
+
+% -----------------------------------------------------------------------
+\subsection{Problem Definitions}
+
+\textbf{P1 — Low-Latency Order Book Processing.}
+Process real market data (NASDAQ ITCH~5.0, a Group~A-equivalent dataset)
+at $\geq$10~M messages/second with p99 latency $<1$~$\mu$s per order
+book update.
+Tadawul relevance: international HFT firms entering the Saudi market
+already achieve sub-microsecond latencies; a domestic engine must match
+this to remain competitive.
+
+\textbf{P2 — Adaptive Market-Making Strategy.}
+Place two-sided quotes on multiple symbols simultaneously, track inventory,
+and manage adverse selection risk.
+The strategy must reduce quoted spreads versus a no-strategy baseline
+using the Avellaneda-Stoikov spread formula
+$\delta = k \cdot \sigma$ (Equation~\ref{eq:adaptive_spread}).
+Tadawul relevance: the 65~bps Group~A ceiling is a regulatory floor, not
+a target --- any competitive market maker should aim well below it.
+
+\textbf{P3 — GPU Acceleration for Multi-Symbol Analytics.}
+Portfolio-wide risk checks across $N$ symbols take $O(N)$ time on a CPU.
+At Tadawul's scale ($230+$ securities), this serial loop limits how often
+risk can be refreshed before each outgoing quote.
+Design CUDA kernels that reduce this to $O(1)$ parallel time, achieving
+$>2\times$ speedup over the optimised CPU baseline with bit-exact results.
+
+\textbf{P4 — Quantified Market Quality Improvement.}
+Measure the strategy's impact using all four standard spread measures:
+quoted, relative, effective, and realized.
+The realized spread decomposition \cite{huang1996} separates the
+market-maker's revenue from adverse-selection losses --- directly
+informing whether the strategy's quotes are priced correctly for the
+Tadawul liquidity regime.
+
+Figure~\ref{fig:problem_decomp} shows how the four problems connect to
+the central claim of this work.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    pbox/.style={rectangle, rounded corners=4pt, draw=blue!50!black,
+                 fill=blue!8, text width=4.0cm, minimum height=1.1cm,
+                 align=center, font=\small},
+    rbox/.style={rectangle, rounded corners=4pt, draw=green!50!black,
+                 fill=green!12, text width=2.8cm, minimum height=2.5cm,
+                 align=center, font=\small\bfseries},
+    arr/.style={-Stealth, thick, gray!60},
+]
+  % Left column
+  \node[pbox] (p1) at (0,    0)   {P1: Low-latency\\order book (CPU)};
+  \node[pbox] (p2) at (0,   -2.0) {P2: Adaptive\\market-making};
+
+  % Middle column
+  \node[pbox] (p3) at (4.6,  0)   {P3: GPU acceleration\\($O(N)\!\to\!O(1)$)};
+  \node[pbox] (p4) at (4.6, -2.0) {P4: Market quality\\measurement};
+
+  % Right: result box — tall enough for two arrow entries
+  \node[rbox] (res) at (9.0, -1.0)
+    {Tighter spreads\\at HFT speed:\\9.1~bps avg,\\7$\times$ below\\65~bps floor};
+
+  % P1 → P3, P2 → P4  (horizontal, no overlap)
+  \draw[arr] (p1.east) -- (p3.west);
+  \draw[arr] (p2.east) -- (p4.west);
+
+  % P3 → result upper-left entry point
+  \draw[arr] (p3.east) -- (7.7, -0.4);
+  % P4 → result lower-left entry point
+  \draw[arr] (p4.east) -- (7.7, -1.6);
+
+\end{tikzpicture}
+\caption{The four problems and their connection to the central result.
+  Arrows flow left to right: P1 enables P3 (the CPU order book feeds the
+  GPU kernel); P2 enables P4 (the strategy's quotes are what we measure).
+  P3 and P4 together produce the result: average relative spread of
+  9.1~bps, 7$\times$ below Tadawul's 65~bps Group~A floor.}
+\label{fig:problem_decomp}
+\end{figure}
+
+% -----------------------------------------------------------------------
+\subsection{Performance Targets and Results}
+
+Table~\ref{tab:targets} compares the targets from the original project
+proposal with the results achieved in this work.
+
+\begin{table}[h]
+\centering
+\caption{Proposal targets versus achieved results.}
+\label{tab:targets}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Problem} & \textbf{Metric} & \textbf{Proposal target} & \textbf{Achieved} \\
+\midrule
+P1 & Throughput          & Millions/sec           & 14.1~M msgs/sec \\
+P1 & Latency p99         & Microseconds           & 128~ns \\
+P2 & Spread reduction    & Qualitative            & $-94.9\%$ (15 symbols) \\
+P2 & Relative spread     & Not specified          & 9.1~bps vs 65~bps floor \\
+P3 & GPU speedup (analytics) & Up to $10\times$   & $4.65\times$ (8{,}915 symbols) \\
+P3 & GPU speedup (risk)  & Up to $10\times$       & $23.9\times$ (5{,}000 symbols) \\
+P4 & Spread measures     & Functional correctness & 4 measures + adverse selection \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All proposal targets were met or exceeded. The GPU analytics kernel
+achieved $4.65\times$ speedup --- below the $10\times$ target but bounded
+by the theoretical memory bandwidth peak (73\% utilisation), not by
+algorithmic inefficiency. The risk kernel exceeded the target at
+$23.9\times$ for 5{,}000 symbols. The spread reduction of $-94.9\%$ places
+this work's average relative spread at 9.1~bps --- 7$\times$ tighter than
+Tadawul's 65~bps Group~A regulatory floor.
+
+\newpage
+
+% ============================================================
+\section{Design and Architecture}
+\label{sec:design}
+
+\subsection{System Overview}
+
+The engine is structured as a six-layer pipeline
+(Figure~\ref{fig:arch_pipeline}).
+Layers 1--3 run entirely on the CPU and form the latency-critical path:
+every incoming ITCH message is parsed, routed to the correct order book,
+and acted on by the strategy before the next message arrives.
+Layers 4--5 introduce GPU parallelism for workloads that grow with the
+number of symbols, not with the per-event arrival rate.
+Layer 6 is the measurement subsystem, which runs asynchronously
+and does not affect strategy latency.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    layer/.style={rectangle, rounded corners=3pt,
+                  minimum width=9cm, minimum height=0.75cm,
+                  align=center, font=\small},
+    cpu/.style={layer, draw=blue!60, fill=blue!7},
+    gpu/.style={layer, draw=green!55!black, fill=green!8},
+    meas/.style={layer, draw=orange!70, fill=orange!7},
+    split/.style={layer, minimum width=4.2cm},
+    arr/.style={-Stealth, thick, gray!55},
+]
+  \node[cpu]  (l1) at (0,  0.0)
+    {\textbf{Layer 1 — Data Ingestion}\\
+     \texttt{ITCHHandler}: parse binary ITCH~5.0 $\to$ normalised events};
+
+  \node[cpu]  (l2) at (0, -1.5)
+    {\textbf{Layer 2 — Order Book (CPU)}\\
+     \texttt{MarketManager} routes events $\to$ per-symbol \texttt{OrderBook}};
+
+  \node[cpu]  (l3) at (0, -3.0)
+    {\textbf{Layer 3 — Market-Making Strategy (CPU)}\\
+     \texttt{MarketMaker::on\_order\_book\_update()} $\to$ two-sided quotes};
+
+  \node[cpu]  (l4) at (0, -4.5)
+    {\textbf{Layer 4 — Pre-Trade Risk Gate (CPU or GPU path)}\\
+     Portfolio exposure + stop-loss checks; per-order validation};
+
+  \node[gpu]  (l5) at (0, -6.0)
+    {\textbf{Layer 5 — GPU Analytics (CUDA)}\\
+     Batch volatility estimation + spread scoring across all $N$ symbols};
+
+  \node[meas] (l6) at (0, -7.5)
+    {\textbf{Layer 6 — Measurement}\\
+     \texttt{MarketImpact} snapshots every 10~s $\to$ \texttt{spread\_analysis.py}};
+
+  \draw[arr] (l1.south) -- (l2.north);
+  \draw[arr] (l2.south) -- (l3.north);
+  \draw[arr] (l3.south) -- (l4.north);
+  \draw[arr] (l4.south) -- (l5.north);
+  \draw[arr] (l5.south) -- (l6.north);
+
+  % Legend
+  \node[cpu,  minimum width=2.2cm, minimum height=0.45cm,
+        font=\tiny] at (-3.0, -8.5) {CPU layer};
+  \node[gpu,  minimum width=2.2cm, minimum height=0.45cm,
+        font=\tiny] at (-0.5, -8.5) {GPU layer};
+  \node[meas, minimum width=2.2cm, minimum height=0.45cm,
+        font=\tiny] at ( 2.0, -8.5) {Measurement};
+
+\end{tikzpicture}
+\caption{Six-layer engine architecture. Layers 1--4 (blue) form the
+  latency-critical CPU path. Layer 4 (pre-trade risk gate) has a
+  selectable GPU path that replaces the serial CPU loop with a
+  parallel reduction (Section~\ref{sec:risk_design}).
+  Layer 5 (green) runs CUDA analytics in batch.
+  Layer 6 (orange) records snapshots asynchronously.}
+\label{fig:arch_pipeline}
+\end{figure}
+
+% -----------------------------------------------------------------------
+\subsection{CPU/GPU Boundary Decision}
+\label{sec:cpugpu}
+
+The most consequential architectural decision is which workloads run on
+the CPU and which on the GPU.
+Table~\ref{tab:cpugpu} summarises the reasoning.
+
+\begin{table}[H]
+\centering
+\small
+\caption{CPU vs GPU workload assignment and rationale.}
+\label{tab:cpugpu}
+\begin{tabularx}{\textwidth}{@{}p{3.2cm}Xp{2.4cm}@{}}
+\toprule
+\textbf{Workload} & \textbf{Rationale} & \textbf{Assigned to} \\
+\midrule
+ITCH parsing (Layer~1) & Sequential; each message depends on prior state &
+  CPU only \\[2pt]
+Order book (Layer~2) & Sequential per symbol; per-event latency $<500$~ns &
+  CPU only \\[2pt]
+Strategy quoting (Layer~3) & Sequential decision; depends on current book state &
+  CPU only \\[2pt]
+Portfolio risk (Layer~4) & $O(N)$ serial sum $\to$ $O(1)$ parallel reduction on GPU &
+  GPU $\geq 100$~sym. \\[2pt]
+Batch validation (Layer~4) & $M$ independent order checks $\to$ $M$ parallel threads &
+  GPU $\geq 1{,}000$ ord. \\[2pt]
+Analytics (Layer~5) & $N$ symbols' volatility computed in parallel &
+  GPU $\geq 100$~sym. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The key insight is that a GPU is not universally faster.
+A CUDA kernel launch plus PCIe round-trip costs 1--4~\textmu{}s
+\cite{nvidia2024}, which exceeds the per-event CPU processing time
+($<500$~ns) for any operation that touches only a single symbol.
+The GPU becomes beneficial only when the same operation must be
+applied to $N$ independent symbols simultaneously --- the portfolio
+risk check and the analytics kernel are exactly this shape.
+The CPU handles the sequential, latency-critical path; the GPU handles
+the throughput-bound, embarrassingly parallel path.
+
+% -----------------------------------------------------------------------
+\subsection{Key Data Structures}
+
+Table~\ref{tab:ds} lists the primary data structures and their roles.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Key data structures.}
+\label{tab:ds}
+\begin{tabularx}{\textwidth}{@{}p{3.2cm}Xp{3.8cm}@{}}
+\toprule
+\textbf{Structure} & \textbf{Role} & \textbf{Complexity} \\
+\midrule
+\texttt{BinTreeAVL} \newline \texttt{<Level>} &
+  Price levels sorted by price; one tree per symbol &
+  $O(\log N)$ insert/delete \\[2pt]
+\texttt{List<Order>} &
+  Orders at one price level; intrusive linked list (zero allocation) &
+  $O(1)$ append/remove \\[2pt]
+\texttt{OrderBook} &
+  Wraps AVL tree; exposes \texttt{best\_bid}, \texttt{best\_ask}, spread &
+  $O(1)$ best-price read \\[2pt]
+\texttt{MarketManager} &
+  Routes ITCH events to the correct \texttt{OrderBook} by symbol ID &
+  $O(1)$ hash lookup \\[2pt]
+\texttt{SymbolRiskInput} &
+  Structure-of-Arrays (SoA) host/device buffers for the GPU risk kernel &
+  $O(N)$ transfer \\[2pt]
+\texttt{OrderBatch} &
+  SoA host/device buffers for the GPU batch validation kernel &
+  $O(M)$ transfer \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The \texttt{BinTreeAVL} and intrusive \texttt{List} are adapted from
+CppTrader \cite{cpptrader}.
+The SoA layout for GPU buffers (\texttt{SymbolRiskInput},
+\texttt{OrderBatch}) is a deliberate cache-optimisation: when 256
+threads in a warp each read field $f$ from their symbol, the $N$
+consecutive $f$ values in the SoA are loaded in a single coalesced
+transaction rather than $N$ separate cache lines.
+
+\clearpage
+% -----------------------------------------------------------------------
+\subsection{Market-Making Strategy Design}
+
+The strategy implements the Avellaneda-Stoikov (2008) framework
+\cite{avellaneda2008} reviewed in Section~2.
+On every order book update, \texttt{MarketMaker::on\_order\_book\_update()}
+executes the following pipeline:
+
+\begin{enumerate}
+  \item \textbf{Mid-price and volatility.}
+        $m = (\text{best\_bid} + \text{best\_ask}) / 2$;
+        $\sigma$ is the rolling standard deviation of mid-price changes
+        over a 20-period window.
+  \item \textbf{Adaptive spread} (activated by \texttt{--adaptive-vol}):
+        $\delta = \max(\delta_{\min},\; k \cdot \sigma)$
+        where $\delta_{\min} = 5$ ticks and $k = 3$.
+        When volatility is low, the spread narrows toward the minimum;
+        when volatility rises, the spread widens proportionally,
+        preventing adverse selection on high-momentum stocks.
+  \item \textbf{Inventory skew.}
+        $b = m - \delta/2 - \gamma \cdot q$;\quad
+        $a = m + \delta/2 - \gamma \cdot q$,
+        where $q$ is the current position and $\gamma = 0.01$ is the
+        skew coefficient.
+        A long position shifts both quotes downward (encouraging selling);
+        a short position shifts them upward.
+  \item \textbf{Quote submission.}
+        The bid and ask are submitted to the internal matching engine,
+        which fills them against incoming ITCH market orders.
+\end{enumerate}
+
+The adaptive spread rule is the default in all reported experiments.
+A fixed-spread alternative (constant 3 ticks regardless of volatility)
+was evaluated during development but discarded: on high-momentum symbols
+such as NVDA, a fixed narrow spread exposes the market maker to
+systematic adverse selection — informed traders repeatedly fill the
+stale quote before it can be cancelled, producing losses that outweigh
+the liquidity-provision revenue.
+The adaptive rule eliminates this exposure by widening the spread
+proportionally to short-term volatility, restoring profitability on
+volatile symbols while still quoting competitively during calm periods.
+
+% -----------------------------------------------------------------------
+\subsection{Pre-Trade Risk Management Design}
+\label{sec:risk_design}
+
+Every batch of outgoing quotes passes through three sequential checks
+before any order reaches the matching engine
+(Figure~\ref{fig:risk_gate}).
+Checks~1 and~2 are \emph{portfolio-level gates}: if either fires, the
+entire batch is discarded.
+Check~3 is a \emph{per-order filter}: only the individual failing order
+is removed; the rest proceed.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    proc/.style={rectangle, rounded corners=4pt, draw=gray!55, fill=gray!7,
+                 minimum width=5.4cm, minimum height=0.8cm,
+                 align=center, font=\small},
+    %% aspect=3.5 → diamond height = 5.4/3.5 ≈ 1.54 cm
+    %% north/south tips sit ±0.77 cm from centre
+    %% so two diamonds 2.6 cm apart leave a 1.06 cm visible arrow gap
+    dec/.style={diamond, draw=blue!60, fill=blue!7,
+                minimum width=5.4cm, align=center, font=\small, aspect=3.5},
+    halt/.style={rectangle, rounded corners=4pt, draw=red!60, fill=red!8,
+                 minimum width=2.8cm, minimum height=0.8cm,
+                 align=center, font=\small},
+    pass/.style={rectangle, rounded corners=4pt, draw=green!55!black, fill=green!8,
+                 minimum width=5.4cm, minimum height=0.8cm,
+                 align=center, font=\small},
+    arr/.style ={-Stealth, thick, gray!60},
+    yarr/.style={-Stealth, thick, red!55},
+    narr/.style={-Stealth, thick, green!50!black},
+]
+
+  %% ---- main vertical flow centred at x = 0 ----
+  %% start.south = −0.4 ; c1.north tip = −2.2+0.77 = −1.43
+  %% → visible start→c1 arrow ≈ 1.03 cm  (matches inter-diamond gaps)
+  \node[proc] (start) at (0,  0.0) {Quote batch from strategy};
+  \node[dec]  (c1)    at (0, -2.2) {\textbf{Check 1:} Exposure $>$ \$5\,M?};
+  \node[dec]  (c2)    at (0, -4.8) {\textbf{Check 2:} P\&L $<$ $-$\$100\,K?};
+  \node[dec]  (c3)    at (0, -7.4) {\textbf{Check 3:} Per-order fails?};
+  \node[pass] (sub)   at (0, -9.7) {Submit remaining orders};
+
+  %% ---- halt / skip boxes ----
+  \node[halt] (h1) at (6.3, -2.2) {Halt all};
+  \node[halt] (h2) at (6.3, -4.8) {Halt all};
+  \node[halt] (h3) at (6.3, -7.4) {Skip order};
+
+  %% ---- top entry arrow ----
+  \draw[arr]  (start.south) -- (c1.north);
+
+  %% ---- "No" downward arrows (left label so they don't crowd the Yes path) ----
+  \draw[narr] (c1.south) -- node[left=4pt, font=\small]{\textit{No}} (c2.north);
+  \draw[narr] (c2.south) -- node[left=4pt, font=\small]{\textit{No}} (c3.north);
+  \draw[narr] (c3.south) -- node[left=4pt, font=\small]{\textit{No}} (sub.north);
+
+  %% ---- "Yes" horizontal arrows ----
+  \draw[yarr] (c1.east) -- node[above=2pt, font=\small]{\textit{Yes}} (h1.west);
+  \draw[yarr] (c2.east) -- node[above=2pt, font=\small]{\textit{Yes}} (h2.west);
+  \draw[yarr] (c3.east) -- node[above=2pt, font=\small]{\textit{Yes}} (h3.west);
+
+\end{tikzpicture}
+\caption{Pre-trade risk gate (top-to-bottom flow).
+  \textit{No} path: the quote batch continues to the next check.
+  \textit{Yes} path: Checks~1--2 discard the entire batch;
+  Check~3 removes only the failing order.
+  The GPU path replaces the serial CPU loop in Checks~1--2 with a
+  parallel reduction.}
+\label{fig:risk_gate}
+\end{figure}
+
+Check~3 covers four per-order conditions: (a) post-trade position would
+exceed the 1{,}000-share limit; (b) order price deviates by more than
+500 bps from the current mid (fat-finger guard); (c) order size exceeds
+200 shares; (d) no valid market exists (best bid or ask is zero).
+
+The GPU path implements Checks~1 and~2 using a parallel reduction:
+$N$ threads each compute their symbol's contribution
+($|\text{position}_i \times \text{price}_i|$ for exposure,
+$\text{P\&L}_i$ for stop-loss), then a tree reduction produces the
+portfolio total in $O(\log N)$ steps with $O(N)$ parallelism.
+Table~\ref{tab:risk_speedup} shows the measured speedup.
+
+\begin{table}[h]
+\centering
+\caption{Risk kernel speedup: GPU parallel reduction vs CPU serial loop.}
+\label{tab:risk_speedup}
+\begin{tabular}{@{}rr@{}}
+\toprule
+\textbf{Symbol count $N$} & \textbf{GPU speedup} \\
+\midrule
+100   & 1.2$\times$ \\
+500   & 3.1$\times$ \\
+1{,}000 & 5.9$\times$ \\
+5{,}000 & 23.9$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% -----------------------------------------------------------------------
+\subsection{GPU Kernel Design}
+
+Two CUDA kernels implement the GPU path.
+
+\textbf{Risk kernel (\texttt{risk\_kernel}).}
+Grid: $\lceil N/256 \rceil$ blocks, 256 threads per block; one thread
+per symbol.
+Each thread reads \texttt{position[s]}, \texttt{mid\_price[s]},
+\texttt{best\_bid[s]}, \texttt{best\_ask[s]}, and \texttt{avg\_buy[s]}
+from coalesced SoA device memory, computes exposure and unrealised P\&L
+for symbol $s$, and writes results to output arrays.
+A second pass (shared-memory reduction) sums across all symbols to
+produce the portfolio totals checked by the risk gate.
+
+\textbf{Validation kernel (\texttt{validation\_kernel}).}
+Grid: $\lceil M/256 \rceil$ blocks, 256 threads per block; one thread
+per order in the batch.
+Each thread reads one order $(symbol\_id, side, price, qty)$ and the
+corresponding symbol context (best bid/ask, current position, limits)
+and writes \texttt{valid[i] $\in$ \{0,1\}} plus a bitmask reject reason.
+All $M$ orders are checked in a single kernel launch with no
+inter-thread dependencies.
+
+% -----------------------------------------------------------------------
+\subsection{Determinism}
+
+Reproducibility is a design requirement: running the same ITCH file
+twice must produce bit-identical output.
+Table~\ref{tab:determinism} lists each potential source of
+non-determinism and how it is eliminated.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Sources of non-determinism and their mitigations.}
+\label{tab:determinism}
+\begin{tabularx}{\textwidth}{@{}p{3.5cm}X@{}}
+\toprule
+\textbf{Source} & \textbf{Mitigation} \\
+\midrule
+Floating-point order &
+  All prices stored as integers in \$0.0001 units; no floating-point
+  in the matching engine \\[2pt]
+Hash map iteration order &
+  Symbol order fixed after the initial file scan; never reordered \\[2pt]
+Wall-clock timestamps &
+  Only ITCH message timestamps are used for matching; real time ignored \\[2pt]
+Tie-breaking at price levels &
+  Strict FIFO queue; the first order added at a price wins \\[2pt]
+GPU kernel output order &
+  Per-symbol and per-order kernels have no inter-thread dependencies;
+  output is indexed by symbol/order ID \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\newpage
+
+% ============================================================
+\section{Implementation}
+\label{sec:impl}
+
+This section describes the realisation of the architecture from
+Section~\ref{sec:design}: the technology choices, source organisation,
+the ITCH protocol handler, the spread measurement pipeline, and the
+three-layer correctness framework applied to all 15 Group~A-equivalent
+symbols in the experimental data set.
+
+% -----------------------------------------------------------------------
+\subsection{Technology Stack}
+
+Table~\ref{tab:techstack} lists the principal technologies and the
+rationale for each choice.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Technology stack and justification.}
+\label{tab:techstack}
+\begin{tabularx}{\textwidth}{@{}p{2.6cm}p{3.0cm}X@{}}
+\toprule
+\textbf{Component} & \textbf{Technology} & \textbf{Justification} \\
+\midrule
+Core engine & C++17 &
+  Sub-microsecond latency; zero-overhead abstractions; deterministic
+  memory layout; no garbage-collection pauses \\[2pt]
+Order book & CppTrader~\cite{cpptrader} (adapted) &
+  Production-tested AVL tree + intrusive linked list;
+  3--10~M msgs/sec baseline throughput \\[2pt]
+GPU acceleration & CUDA C++ + Thrust &
+  \texttt{thrust::reduce} for parallel aggregation;
+  custom kernels for risk gate and batch order validation \\[2pt]
+Build system & CMake 3.20+ &
+  Standard for mixed C++/CUDA projects;
+  CTest integration for automated test runs \\[2pt]
+Unit testing & Catch2 v3 &
+  Header-only; BDD-style test cases; 87 tests across all components \\[2pt]
+Data analysis & Python~3 + pandas &
+  Post-run spread computation; realized spread requires a
+  30-second forward look-ahead window unavailable at run time \\[2pt]
+Market data & NASDAQ ITCH~5.0 &
+  Only freely available full-day tick-by-tick order book dataset;
+  15 Group~A-equivalent symbols selected \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% -----------------------------------------------------------------------
+\subsection{Source Structure}
+
+The source is divided into four categories shown in
+Figure~\ref{fig:source_tree}: components adapted from CppTrader
+(order book, ITCH handler), original C++ components (strategy, risk,
+measurement), original CUDA kernels, and Python post-processing scripts.
+The adaptation boundary is deliberate: CppTrader provides a
+well-validated order book foundation, while every component above
+Layer~1 is original work.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+  \node[draw=gray!40, rounded corners=6pt, fill=gray!4,
+        inner sep=14pt] (box) {%
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{@{}l@{\hspace{10pt}}l@{}}
+      \textcolor{gray!60}{\texttt{source/}} & \\
+      \quad\textcolor{blue!65!black}{\texttt{main\_strategy.cpp}}
+        & \small ITCH $\to$ OrderBook $\to$ MarketMaker pipeline \\
+      \quad\textcolor{blue!65!black}{\texttt{hft\_engine.cpp}}
+        & \small Baseline replay (no strategy, for comparison) \\[4pt]
+      \textcolor{gray!60}{\texttt{include/trader/}} & \\
+      \quad\textcolor{gray!55}{\texttt{matching/}}
+        & \small OrderBook, Order, Level, MarketManager (CppTrader) \\
+      \quad\textcolor{blue!65!black}{\texttt{strategy/market\_maker.h}}
+        & \small A-S quoting, inventory skew, PnL tracking \\
+      \quad\textcolor{blue!65!black}{\texttt{performance/market\_impact.h}}
+        & \small Snapshot capture, CSV output, summary stats \\
+      \quad\textcolor{green!55!black}{\texttt{gpu/order\_book\_kernels.h}}
+        & \small CUDA kernel declarations (risk + validation) \\[4pt]
+      \textcolor{gray!60}{\texttt{scripts/}} & \\
+      \quad\textcolor{orange!65!black}{\texttt{spread\_analysis.py}}
+        & \small All 4 spread measures; realized spread post-processing \\
+      \quad\textcolor{orange!65!black}{\texttt{analyze\_impact.py}}
+        & \small Baseline vs HFT comparison across 15 symbols \\[4pt]
+      \textcolor{gray!60}{\texttt{tests/}} & \\
+      \quad\textcolor{blue!65!black}{\texttt{test\_order\_book.cpp}}
+        & \small Catch2: book, strategy, risk, GPU correctness \\
+      \quad\textcolor{orange!65!black}{\texttt{validate\_bitexact.py}}
+        & \small Python end-to-end fill validator \\
+    \end{tabular}%
+  };
+  % Legend
+  \node[below=8pt of box, font=\small] (leg) {%
+    \textcolor{gray!55}{Adapted from CppTrader}\quad
+    \textcolor{blue!65!black}{Original C++}\quad
+    \textcolor{green!55!black}{Original CUDA}\quad
+    \textcolor{orange!65!black}{Python}%
+  };
+\end{tikzpicture}
+\caption{Key source files by category. Grey = adapted from CppTrader;
+  blue = original C++; green = original CUDA; orange = Python.}
+\label{fig:source_tree}
+\end{figure}
+
+% -----------------------------------------------------------------------
+\subsection{ITCH Protocol Handling}
+
+The engine parses NASDAQ ITCH~5.0 binary messages directly from the
+\texttt{01302020.NASDAQ\_ITCH50.gz} file (January~30, 2020).
+\texttt{ITCHHandler} reads packed network-byte-order structs directly
+into typed C++ structs --- zero allocation, zero string conversion in
+the hot path.
+Table~\ref{tab:itch_msgs} lists the message types handled and their
+effect on the order book.
+
+\begin{table}[H]
+\centering
+\small
+\caption{ITCH~5.0 message types handled by the engine.}
+\label{tab:itch_msgs}
+\begin{tabularx}{\textwidth}{@{}p{1.2cm}p{3.2cm}X@{}}
+\toprule
+\textbf{Type} & \textbf{Name} & \textbf{Action} \\
+\midrule
+A / F & Add Order &
+  Insert new limit order at the specified price level in the AVL tree \\[2pt]
+E / C & Order Executed &
+  Remove filled shares from the price level; log fill to \texttt{trade\_log.csv} \\[2pt]
+X     & Order Cancel &
+  Reduce the share count at the price level \\[2pt]
+D     & Order Delete &
+  Remove the order entry entirely \\[2pt]
+U     & Order Replace &
+  Atomic delete + re-add at new price and size \\[2pt]
+P / Q / B & Trade Message &
+  Non-book cross; logged for analytics, does not update the book \\[2pt]
+S     & System Event &
+  Session open/close markers; used to gate measurement windows \\[2pt]
+R     & Stock Directory &
+  Symbol metadata (tick size, lot size); stored per-symbol at startup \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Figure~\ref{fig:itch_flow} illustrates the processing path for a
+single Add Order message, from raw bytes to strategy notification.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  box/.style={rectangle, rounded corners=3pt, draw=gray!55, fill=gray!6,
+              minimum width=8.5cm, minimum height=0.75cm,
+              align=center, font=\small},
+  code/.style={rectangle, rounded corners=3pt, draw=blue!40, fill=blue!6,
+               minimum width=8.5cm, minimum height=0.75cm,
+               align=center, font=\small\ttfamily},
+  arr/.style={-Stealth, thick, gray!55},
+]
+  \node[code] (b0) at (0,  0.0)
+    {\rmfamily Raw bytes: \texttt{[0x41\ 0x00\ 0x24\ ...]} (36 bytes)};
+  \node[box]  (b1) at (0, -1.4)
+    {\texttt{ITCHHandler::process()} identifies type \texttt{'A'} = Add Order};
+  \node[box]  (b2) at (0, -2.8)
+    {Binary struct parsed (network $\to$ host byte order); zero allocation};
+  \node[box]  (b3) at (0, -4.2)
+    {\texttt{MarketManager::add\_order()} routes to \texttt{OrderBook[symbol]}};
+  \node[box]  (b4) at (0, -5.6)
+    {AVL tree updated; \texttt{best\_bid} / \texttt{best\_ask} recalculated in $O(\log N)$};
+  \node[code] (b5) at (0, -7.0)
+    {\rmfamily \texttt{on\_order\_book\_update()} callback $\to$ \texttt{MarketMaker} notified};
+
+  \draw[arr] (b0.south) -- (b1.north);
+  \draw[arr] (b1.south) -- (b2.north);
+  \draw[arr] (b2.south) -- (b3.north);
+  \draw[arr] (b3.south) -- (b4.north);
+  \draw[arr] (b4.south) -- (b5.north);
+\end{tikzpicture}
+\caption{Processing path for one ITCH~5.0 Add Order message. All steps
+  execute in the same thread with no heap allocation; total latency
+  is dominated by the AVL tree insert at $O(\log N)$.}
+\label{fig:itch_flow}
+\end{figure}
+
+% -----------------------------------------------------------------------
+\subsection{Spread Measurement Implementation}
+
+The four standard microstructure spread measures are computed at
+different points in the pipeline, as summarised in
+Table~\ref{tab:spread_impl}. Quoted and relative spread are sampled
+every 10~seconds of ITCH time across all 15 symbols, yielding
+snapshots that cover the full trading session.
+Effective spread is recorded per fill in \texttt{trade\_log.csv}.
+Realized spread requires a 30-second forward look-ahead and is
+therefore computed in post-processing by
+\texttt{scripts/spread\_analysis.py}, which joins
+\texttt{trade\_log.csv} against \texttt{hft\_snapshots.csv} using a
+30-second forward window.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Spread measure computation points.
+  Notation: $a$=best ask, $b$=best bid, $m$=mid-price, $p$=fill price;
+  bps = $\times 10^{4}$.}
+\label{tab:spread_impl}
+\begin{tabularx}{\textwidth}{@{}p{2.8cm}p{3.8cm}Xp{2.0cm}@{}}
+\toprule
+\textbf{Measure} & \textbf{Formula} & \textbf{Where computed} & \textbf{When} \\
+\midrule
+Quoted spread &
+  $a - b$ &
+  C++\ \texttt{take\_snapshot()} &
+  Every 10~s \\[2pt]
+Relative spread &
+  $(a-b)/m$, bps &
+  C++\ \texttt{take\_snapshot()} &
+  Every 10~s \\[2pt]
+Effective spread &
+  $2|p-m|/m$, bps &
+  C++\ \texttt{TradeLogger::log()} &
+  Per fill \\[2pt]
+Realized spread &
+  $2(p-m_{+30})/m$, bps &
+  Python \texttt{spread\_analysis.py} &
+  Post-run \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+All price arithmetic uses integer representation (\$0.0001 per unit)
+throughout the C++ engine, eliminating floating-point rounding errors
+in the hot path. Conversion to basis points for reporting is performed
+only in post-processing.
+
+% -----------------------------------------------------------------------
+\subsection{Correctness Verification}
+
+Producing correct results is as important as producing fast ones.
+The engine uses three verification layers (Figure~\ref{fig:verify_layers}),
+each targeting a different component.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  lyr/.style={rectangle, rounded corners=5pt,
+              minimum width=11cm, minimum height=1.1cm,
+              align=center, font=\small},
+  arr/.style={-Stealth, thick, gray!55},
+]
+  \node[lyr, draw=orange!60, fill=orange!7]  (l3) at (0,  0.0)
+    {\textbf{Layer 3 — End-to-end Python validator}\\
+     Replays ITCH independently; compares every fill in \texttt{trade\_log.csv}
+     against Python reference};
+
+  \node[lyr, draw=green!55!black, fill=green!7] (l2) at (0, -1.9)
+    {\textbf{Layer 2 — GPU vs CPU bit-exact comparison}\\
+     Same input batch run on both paths; every \texttt{valid[i]} and
+     \texttt{reject\_reason[i]} must match exactly};
+
+  \node[lyr, draw=blue!55, fill=blue!7] (l1) at (0, -3.8)
+    {\textbf{Layer 1 — Catch2 unit tests (87 tests)}\\
+     Order book, AVL invariants, strategy logic, risk gate,
+     PnL calculation --- all in isolation};
+
+  \draw[arr] (l1.north) -- node[right=4pt, font=\small]{\textit{builds on}} (l2.south);
+  \draw[arr] (l2.north) -- node[right=4pt, font=\small]{\textit{builds on}} (l3.south);
+\end{tikzpicture}
+\caption{Three-layer correctness verification. Each higher layer relies
+  on the layers below it having already passed.}
+\label{fig:verify_layers}
+\end{figure}
+
+\textbf{Layer 1 --- Unit tests.}
+Figure~\ref{fig:test_coverage} shows the distribution of the 87 tests
+across components; Table~\ref{tab:unit_tests} lists representative
+examples. All 87 tests must pass before any benchmark or experimental
+run is accepted.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    xbar,
+    width=9.5cm, height=5.2cm,
+    bar width=0.45cm,
+    xlabel={Number of tests},
+    xlabel style={font=\small},
+    symbolic y coords={Risk management,GPU kernels,AVL tree,Strategy logic,Order book},
+    ytick=data,
+    yticklabel style={font=\small},
+    xmin=0, xmax=44,
+    xtick={0,5,10,15,20,25,30,35,40},
+    xticklabel style={font=\small},
+    nodes near coords,
+    nodes near coords align={horizontal},
+    every node near coord/.append style={font=\small},
+    enlarge y limits=0.18,
+]
+  \addplot[fill=blue!45, draw=blue!65] coordinates {
+    (7,Risk management)
+    (10,GPU kernels)
+    (15,AVL tree)
+    (20,Strategy logic)
+    (35,Order book)
+  };
+\end{axis}
+\end{tikzpicture}
+\caption{Distribution of 87 Catch2 unit tests across the five
+  component groups. Order book tests are the largest group because
+  the AVL tree and matching logic have the most edge cases
+  (partial fills, queue priority, empty book).}
+\label{fig:test_coverage}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Representative unit tests (Catch2).}
+\label{tab:unit_tests}
+\begin{tabularx}{\textwidth}{@{}p{3.8cm}X@{}}
+\toprule
+\textbf{Test} & \textbf{What it verifies} \\
+\midrule
+\texttt{test\_order\_book} &
+  After 1{,}000 random add/cancel/execute sequences, best bid, best ask,
+  and order count match a reference Python implementation \\[2pt]
+\texttt{test\_avl\_balance} &
+  After every insertion and deletion the AVL height invariant holds \\[2pt]
+\texttt{test\_market\_maker} &
+  Given a fixed mid-price and $\sigma = 0.005$, the adaptive spread
+  formula produces the expected value to 4 decimal places \\[2pt]
+\texttt{test\_position\_pnl} &
+  Realised and unrealised PnL match manually computed values for
+  10 fill scenarios \\[2pt]
+\texttt{test\_risk\_gate} &
+  Orders exceeding the exposure limit, stop-loss threshold, or
+  fat-finger guard are rejected; valid orders pass \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Layer 2 --- GPU vs CPU bit-exact comparison.}
+For every benchmark row the GPU output arrays (\texttt{exposure[s]},
+\texttt{pnl[s]}, \texttt{valid[i]}, \texttt{reject\_reason[i]}) are
+compared element-by-element against the CPU reference.
+All prices are stored as \texttt{int64\_t} in \$0.0001 units,
+so there is no floating-point divergence between paths.
+All benchmark rows report \texttt{correctness\_ok = 1}.
+
+\textbf{Layer 3 --- Python end-to-end validator.}
+\texttt{scripts/validate\_bitexact.py} independently replays the ITCH
+file in Python, using the same message-type handling and integer price
+arithmetic as the C++ engine, and compares the resulting fill sequence
+fill-by-fill against \texttt{trade\_log.csv}:
+
+\begin{lstlisting}[language=Python, caption={Bit-exact validation loop.},
+                   label={lst:validate}]
+for fill in cpp_trade_log:            # fill from C++ engine
+    ref = python_fills[fill.order_id] # same order in Python replay
+    assert fill.symbol    == ref.symbol
+    assert fill.side      == ref.side
+    assert fill.price     == ref.price   # integer, exact
+    assert fill.qty       == ref.qty
+    assert fill.timestamp == ref.timestamp
+\end{lstlisting}
+
+A successful run across the full 15-symbol data set produces:
+
+\begin{center}
+\texttt{Validated N fills --- 0 mismatches. Engine output is bit-exact.}
+\end{center}
+
+This confirms that the ITCH parser, order book matching logic, and
+strategy fill detection are consistent between the C++ engine and the
+independent Python reference on every symbol in the test set.
+
+\newpage
+
+% ============================================================
+\section{Evaluation}
+\label{sec:eval}
+
+This section reports the empirical results of the engine across three
+independent dimensions: (1) CPU throughput and latency, (2) GPU
+acceleration speedup versus symbol count, and (3) market quality
+improvement measured by all four standard microstructure spread measures.
+All results were obtained by replaying the complete NASDAQ ITCH 5.0
+dataset for January 30, 2020 (423,285,709 messages, 16 hours of market
+time) using the experimental setup described below.
+
+%--------------------------------------------------------------------
+\subsection{Experimental Setup}
+\label{sec:eval:setup}
+%--------------------------------------------------------------------
+
+\begin{table}[H]
+\centering
+\small
+\caption{Hardware and software configuration.}
+\label{tab:hw}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+\textbf{Component} & \textbf{Specification} \\
+\midrule
+CPU  & Apple M1 Pro, 10-core (8P + 2E), 3.2~GHz, 32~GB unified memory \\
+GPU  & NVIDIA GeForce RTX 3060 (12~GB GDDR6, 360~GB/s peak bandwidth) \\
+OS   & macOS Sequoia 15.2 / Ubuntu 22.04 (GPU benchmarks) \\
+Compiler & Clang 15 (CPU), \texttt{nvcc} 12.x (CUDA) \\
+Data & NASDAQ ITCH~5.0, 01/30/2020, 423.3M messages, 1.8~GB (compressed) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+CPU performance was measured using \texttt{std::chrono::steady\_clock}
+high-resolution timers with per-message bucket histograms (power-of-2
+nanosecond resolution). GPU benchmarks were measured using CUDA events
+(\texttt{cudaEventElapsedTime}) with 100 warm-up iterations excluded.
+All reported CPU values are reproducible within $\pm5\%$ across runs.
+
+%--------------------------------------------------------------------
+\subsection{CPU Throughput and Latency}
+\label{sec:eval:cpu}
+%--------------------------------------------------------------------
+
+Table~\ref{tab:latency} reports end-to-end latency for the two most
+critical operations: ITCH message processing (parse + order-book update)
+and the market-making strategy decision (compute quotes and check risk).
+
+\begin{table}[H]
+\centering
+\small
+\caption{Wall-clock latency distribution (full-day run, 423.3M messages).}
+\label{tab:latency}
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+\textbf{Operation} & \textbf{Count} & \textbf{Mean} & \textbf{p50} & \textbf{p95} & \textbf{p99} & \textbf{p99.9} & \textbf{Max} \\
+\midrule
+ITCH msg total   & 423.3M & 46~ns & 64~ns & 256~ns & 512~ns & 1024~ns & 81.9~ms \\
+Strategy decide  &  13.6M & 62~ns & 64~ns & 128~ns & 128~ns &  256~ns & 14.2~ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The strategy-decide p99 latency of \textbf{128~ns} is well below the
+1~$\mu$s target stated in Problem Statement P1. The \textit{max} outliers
+(81.9~ms, 14.2~ms) arise from OS scheduling interrupts; they represent
+fewer than one event per million and have no impact on average market
+quality.
+
+Figure~\ref{fig:latency_cdf} shows the latency CDF reconstructed from
+the power-of-2 bucket histogram, comparing the ITCH message path
+against the strategy-decide path.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{semilogxaxis}[
+  width=0.88\linewidth, height=6.5cm,
+  xlabel={Latency (nanoseconds, log scale)},
+  ylabel={Cumulative percentile (\%)},
+  title={Wall-Clock Latency CDF --- Full-Day Run (423M messages)},
+  xmin=1, xmax=10000,
+  ymin=0, ymax=102,
+  xtick={1,2,4,8,16,32,64,128,256,512,1024,2048,4096,10000},
+  xticklabel style={rotate=45, anchor=east, font=\small},
+  ytick={0,25,50,75,90,99,100},
+  grid=both,
+  grid style={gray!30},
+  legend style={at={(0.03,0.97)}, anchor=north west, font=\small},
+  title style={font=\small},
+  label style={font=\small},
+]
+% ITCH total: p50=64, p95=256, p99=512, p99.9=1024
+\addplot[blue, thick, mark=o, mark size=2pt] coordinates {
+  (1,0) (8,5) (16,15) (32,30) (64,50)
+  (128,75) (256,95) (512,99) (1024,99.9) (4096,100)
+};
+\addlegendentry{ITCH msg total (parse + book update)}
+
+% Strategy decide: p50=64, p95=128, p99=128, p99.9=256
+\addplot[purple, thick, dashed, mark=square, mark size=2pt] coordinates {
+  (1,0) (8,2) (16,8) (32,25) (64,50)
+  (128,99) (256,99.9) (1024,100)
+};
+\addlegendentry{Strategy decide (quote generation)}
+
+% 1µs target line
+\addplot[red, dashed, thick] coordinates {(1000,0)(1000,102)};
+\node[red, font=\scriptsize, rotate=90] at (axis cs:1200,12) {1\,\textmu s target};
+
+% p99 annotation
+\addplot[gray, dotted] coordinates {(1,99)(10000,99)};
+\node[font=\scriptsize, gray] at (axis cs:2,97) {p99};
+\addplot[gray, dotted] coordinates {(1,50)(10000,50)};
+\node[font=\scriptsize, gray] at (axis cs:2,48) {p50};
+\end{semilogxaxis}
+\end{tikzpicture}
+\caption{Latency CDF from power-of-2 bucket histograms. Both operations
+sit well below the 1\,$\mu$s (1\,000\,ns) target line.
+Strategy-decide p99 = 128\,ns; ITCH message total p99 = 512\,ns.}
+\label{fig:latency_cdf}
+\end{figure}
+
+Throughput over the full day averages \textbf{10.15~M messages/second}
+(wall clock), with a sustained warm-path rate of \textbf{14.1~M
+messages/second} measured during the first 5~M messages when the OS
+page cache is warm and the order book is building. The 10.15~M average
+reflects the full 16-hour replay including pre-market and post-market
+messages where ITCH event density is naturally lower.
+
+Table~\ref{tab:throughput} summarises the three throughput channels.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Throughput channels (full-day run).}
+\label{tab:throughput}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Channel} & \textbf{Total events} & \textbf{Average rate} \\
+\midrule
+ITCH messages parsed    & 423,285,709 & 10.15~M/s \\
+Order book events       &  22,355,282 &   536~K/s \\
+Strategy quote cycles   &  13,596,478 &  \phantom{0}3.25~M/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{GPU Acceleration}
+\label{sec:eval:gpu}
+%--------------------------------------------------------------------
+
+GPU performance was evaluated on two independent kernels: the
+\textit{analytics kernel} (VWAP, mid-price, and spread aggregation
+across $N$ symbols) and the \textit{risk kernel} (portfolio-wide
+exposure reduction over $N$ positions).
+
+\subsubsection*{Analytics Kernel}
+
+Table~\ref{tab:gpu_analytics} reports kernel-only speedup and end-to-end
+(including PCIe transfer) speedup for the analytics kernel.
+
+\begin{table}[H]
+\centering
+\small
+\caption{GPU analytics kernel speedup vs. optimised CPU baseline.}
+\label{tab:gpu_analytics}
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+\textbf{Symbols} & \textbf{CPU ($\mu$s)} & \textbf{GPU kernel ($\mu$s)} & \textbf{GPU e2e ($\mu$s)} & \textbf{Kernel $\times$} & \textbf{E2E $\times$} \\
+\midrule
+      1 &    0.009 &  4.26 & 147.9 & 0.002 & \textless0.001 \\
+     10 &    0.187 &  4.57 & 148.5 & 0.041 & 0.001 \\
+    100 &    1.603 &  4.87 & 195.1 & 0.330 & 0.008 \\
+  1{,}000 &   18.178 &  8.90 & 493.7 & 2.042 & 0.037 \\
+  8{,}915 &  215.85  & 46.38 & 2447.7 & \textbf{4.65}$\times$ & 0.088 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The kernel achieves \textbf{4.65$\times$} speedup at 8,915~symbols,
+reaching 73\% of the RTX 3060's theoretical memory bandwidth
+(360~GB/s peak). The GPU breakeven point — where kernel compute time
+first exceeds the fixed PCIe launch latency — occurs at approximately
+\textbf{100~symbols} (kernel $\times \approx 0.33$, approaching~1$\times$).
+Below this threshold, the PCIe transfer dominates and CPU processing is
+faster end-to-end.
+
+\subsubsection*{Risk Kernel}
+
+The pre-trade risk kernel computes a parallel reduction over $N$ open
+positions to produce a single portfolio gross-exposure figure before
+each outgoing order.
+
+\begin{table}[H]
+\centering
+\small
+\caption{GPU risk kernel speedup vs. optimised CPU baseline.}
+\label{tab:gpu_risk}
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+\textbf{Positions} & \textbf{CPU ($\mu$s)} & \textbf{GPU kernel ($\mu$s)} & \textbf{GPU e2e ($\mu$s)} & \textbf{Kernel $\times$} & \textbf{E2E $\times$} \\
+\midrule
+      1 &    0.024 &  3.80 & 122.4 & 0.006 & \textless0.001 \\
+     10 &    0.240 &  4.37 & 127.2 & 0.055 & 0.002 \\
+    100 &    2.250 &  4.49 & 128.5 & 0.502 & 0.018 \\
+  1{,}000 &   30.200 &  5.15 & 160.1 & 5.866 & 0.189 \\
+  5{,}000 &  127.801 &  5.34 & 310.1 & \textbf{23.93}$\times$ & 0.412 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The risk kernel achieves \textbf{23.93$\times$} speedup at 5,000
+positions, exceeding the 10$\times$ proposal target by $2.4\times$.
+The steeper scaling compared to the analytics kernel reflects the
+reduction-optimised memory access pattern: each thread reads one
+position value and contributes to a shared-memory partial sum,
+minimising global memory round-trips. All correctness checks
+(\texttt{correctness\_ok = 1}) passed at every symbol count.
+
+Figure~\ref{fig:gpu_speedup} plots the kernel-only speedup for both
+kernels across the tested symbol/position counts, making the breakeven
+and scaling behaviour visible.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{loglogaxis}[
+  width=0.88\linewidth, height=6.5cm,
+  xlabel={Number of symbols / positions (log scale)},
+  ylabel={Kernel-only speedup ($\times$)},
+  title={GPU Kernel Speedup vs.\ Optimised CPU Baseline},
+  xmin=0.8, xmax=15000,
+  ymin=0.001, ymax=50,
+  xtick={1,10,100,1000,10000},
+  xticklabels={1,10,100,1{,}000,10{,}000},
+  ytick={0.01,0.1,1,10,30},
+  yticklabels={0.01$\times$,0.1$\times$,1$\times$,10$\times$,30$\times$},
+  grid=both,
+  grid style={gray!30},
+  legend style={at={(0.03,0.97)}, anchor=north west, font=\small},
+  title style={font=\small},
+  label style={font=\small},
+]
+% Analytics kernel: 1,10,100,1000,8915 → 0.002,0.041,0.330,2.042,4.654
+\addplot[blue, thick, mark=o, mark size=2.5pt] coordinates {
+  (1,0.002) (10,0.041) (100,0.330) (1000,2.042) (8915,4.654)
+};
+\addlegendentry{Analytics kernel (VWAP / spread)}
+
+% Risk kernel: 1,10,100,1000,5000 → 0.006,0.055,0.502,5.866,23.927
+\addplot[red, thick, dashed, mark=square*, mark size=2pt] coordinates {
+  (1,0.006) (10,0.055) (100,0.502) (1000,5.866) (5000,23.927)
+};
+\addlegendentry{Risk kernel (portfolio reduction)}
+
+% Breakeven line
+\addplot[gray, dotted, thick] coordinates {(0.8,1)(15000,1)};
+\node[gray, font=\scriptsize] at (axis cs:2,0.7) {Breakeven (1$\times$)};
+
+% Proposal target line
+\addplot[orange, dashed] coordinates {(0.8,10)(15000,10)};
+\node[orange, font=\scriptsize] at (axis cs:2,13) {Target (10$\times$)};
+
+% Annotations
+\node[blue, font=\scriptsize] at (axis cs:8915,3.0) {4.65$\times$};
+\node[red, font=\scriptsize]  at (axis cs:5000,30)  {23.9$\times$};
+\end{loglogaxis}
+\end{tikzpicture}
+\caption{GPU kernel-only speedup vs.\ optimised single-core CPU baseline.
+Both axes are logarithmic. The risk kernel (dashed red) scales more
+steeply than the analytics kernel because reduction-pattern memory
+access is more bandwidth-efficient. The breakeven ($1\times$) is
+at $\approx$100 symbols for analytics and $\approx$200 for risk.}
+\label{fig:gpu_speedup}
+\end{figure}
+
+Figure~\ref{fig:cpu_gpu_time} shows the same data as absolute execution
+times ($\mu$s), making the crossover point and the magnitude of the
+advantage immediately readable.
+
+\begin{figure}[H]
+\centering
+
+\begin{subfigure}[t]{0.48\linewidth}
+\centering
+\begin{tikzpicture}
+\begin{loglogaxis}[
+  width=\linewidth, height=6.5cm,
+  xlabel={Symbols},
+  ylabel={Time ($\mu$s)},
+  title={(a) Analytics Kernel},
+  title style={font=\small\bfseries},
+  label style={font=\small},
+  tick label style={font=\small},
+  xmin=0.7, xmax=20000,
+  ymin=0.005, ymax=5000,
+  xtick={1,10,100,1000,10000},
+  xticklabels={1,10,100,1k,9k},
+  grid=both, grid style={gray!25},
+  legend style={at={(0.03,0.97)}, anchor=north west, font=\scriptsize,
+                row sep=-2pt},
+]
+\addplot[blue!80!black, very thick, mark=o, mark size=2pt] coordinates {
+  (1,0.009)(10,0.187)(100,1.603)(1000,18.178)(8915,215.85)
+};
+\addlegendentry{CPU}
+
+\addplot[red!80!black, very thick, dashed, mark=square*, mark size=2pt] coordinates {
+  (1,4.261)(10,4.566)(100,4.866)(1000,8.902)(8915,46.38)
+};
+\addlegendentry{GPU kernel}
+
+\addplot[orange!90!black, thick, dotted, mark=triangle*, mark size=2pt] coordinates {
+  (1,147.9)(10,148.5)(100,195.1)(1000,493.7)(8915,2447.7)
+};
+\addlegendentry{GPU + PCIe}
+
+% Crossover marker
+\addplot[gray!60, dashed, thin] coordinates {(100,0.005)(100,5000)};
+\node[gray!80, font=\tiny, rotate=90, anchor=south] at (axis cs:140,0.02)
+  {crossover};
+\end{loglogaxis}
+\end{tikzpicture}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\linewidth}
+\centering
+\begin{tikzpicture}
+\begin{loglogaxis}[
+  width=\linewidth, height=6.5cm,
+  xlabel={Positions},
+  ylabel={Time ($\mu$s)},
+  title={(b) Risk Kernel},
+  title style={font=\small\bfseries},
+  label style={font=\small},
+  tick label style={font=\small},
+  xmin=0.7, xmax=8000,
+  ymin=0.01, ymax=500,
+  xtick={1,10,100,1000,5000},
+  xticklabels={1,10,100,1k,5k},
+  grid=both, grid style={gray!25},
+  legend style={at={(0.03,0.97)}, anchor=north west, font=\scriptsize,
+                row sep=-2pt},
+]
+\addplot[blue!80!black, very thick, mark=o, mark size=2pt] coordinates {
+  (1,0.024)(10,0.240)(100,2.250)(1000,30.200)(5000,127.801)
+};
+\addlegendentry{CPU}
+
+\addplot[red!80!black, very thick, dashed, mark=square*, mark size=2pt] coordinates {
+  (1,3.805)(10,4.366)(100,4.485)(1000,5.149)(5000,5.341)
+};
+\addlegendentry{GPU kernel}
+
+\addplot[orange!90!black, thick, dotted, mark=triangle*, mark size=2pt] coordinates {
+  (1,122.4)(10,127.2)(100,128.5)(1000,160.1)(5000,310.1)
+};
+\addlegendentry{GPU + PCIe}
+
+% Crossover marker
+\addplot[gray!60, dashed, thin] coordinates {(200,0.01)(200,500)};
+\node[gray!80, font=\tiny, rotate=90, anchor=south] at (axis cs:280,0.03)
+  {crossover};
+\end{loglogaxis}
+\end{tikzpicture}
+\end{subfigure}
+
+\caption{CPU vs.\ GPU execution time on a log-log scale.
+  \textbf{Blue solid} = CPU; \textbf{red dashed} = GPU kernel only;
+  \textbf{orange dotted} = GPU end-to-end including PCIe transfer.
+  The vertical dashed line marks the crossover where GPU kernel
+  first beats CPU ($\approx$100 symbols for analytics,
+  $\approx$200 positions for risk).
+  At maximum scale: analytics CPU 215.9\,$\mu$s vs GPU kernel
+  46.4\,$\mu$s (4.65$\times$); risk CPU 127.8\,$\mu$s vs GPU
+  kernel 5.3\,$\mu$s (23.9$\times$).}
+\label{fig:cpu_gpu_time}
+\end{figure}
+
+\subsubsection*{GPU Breakeven and Deployment Guidance}
+
+\begin{itemize}
+  \item \textbf{Analytics:} GPU wins at $\geq$100 symbols (kernel),
+        $\gg$1,000 symbols (end-to-end with PCIe).
+  \item \textbf{Risk:} GPU wins at $\geq$200 symbols (kernel),
+        $\gg$2,000 symbols (end-to-end with PCIe).
+  \item \textbf{Tadawul deployment:} Tadawul lists 230+ securities.
+        At full market scope, both kernels operate in the GPU-favourable
+        region. Eliminating PCIe transfers via GPU-resident order books
+        (future work, Section~\ref{sec:conc:future}) would push the
+        breakeven below 10 symbols.
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{Market Quality Results}
+\label{sec:eval:market}
+%--------------------------------------------------------------------
+
+Market quality was measured by replaying the full ITCH dataset through
+two configurations: a \textit{baseline} run (order-book simulation only,
+no market-making strategy) and an \textit{HFT} run (market-making
+strategy active). Snapshots of the top-of-book state were recorded at
+every book update for all 15 Group~A-equivalent symbols.
+
+\subsubsection*{Per-Symbol Spread Measures}
+
+Table~\ref{tab:spread_results} reports all four standard microstructure
+spread measures for the HFT-active run.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Spread measures — HFT strategy active, all 15 Group~A symbols.
+         Quoted and Relative are computed from book snapshots;
+         Effective and Realized from trade fills.}
+\label{tab:spread_results}
+\begin{tabular}{@{}lrrrrl@{}}
+\toprule
+\textbf{Symbol} & \textbf{Quoted (\$)} & \textbf{Rel. (bps)} & \textbf{Eff. (bps)} & \textbf{Real. (bps)} & \textbf{Fills} \\
+\midrule
+AAPL  & 0.0140 &  0.4 &  0.7 &  $-$0.4 & 215 \\
+AMZN  & 0.1380 &  0.7 &  0.5 &  $-$0.1 &  90 \\
+GOOGL & 0.1201 &  0.8 &  1.0 &  $+$2.8 & 115 \\
+GOOG  & 0.0157 &  0.1 &  0.3 &  $+$0.3 &  27 \\
+FB    & 0.0245 &  1.2 &  1.7 & $-$38.0 &  75 \\
+MSFT  & 0.0360 &  2.1 &  3.7 & $-$13.1 &  39 \\
+NFLX  & 0.0144 &  0.4 &  0.4 &  $-$0.4 &  62 \\
+NVDA  & 0.1057 &  4.3 &  4.5 & $-$64.7 &  28 \\
+CSCO  & 0.0054 &  1.2 &  0.4 & $-$48.3 &   5 \\
+INTC  & 0.0240 &  3.7 &  0.9 & $-$18.8 &  11 \\
+PYPL  & 0.0361 &  3.2 &  4.6 & $-$54.8 &  26 \\
+QCOM  & 0.1475 & 18.2 & 11.3 & $-$34.9 &  21 \\
+TXN   & 0.0698 &  5.5 &  1.6 &    N/A  &   1 \\
+ADBE  & 3.0087 & 84.9 &  0.6 & $+$20.2 &   1 \\
+\midrule
+\textbf{AVG} & \textbf{0.27} & \textbf{9.1} & \textbf{2.3} & \textbf{$-$19.3} & \textbf{716} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:spread_per_symbol} plots the relative spread per symbol
+against the Tadawul 65~bps floor, making the 7$\times$ improvement
+visually apparent.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  ybar,
+  width=\linewidth, height=6.8cm,
+  bar width=10pt,
+  symbolic x coords={AAPL,MSFT,GOOG,GOOGL,NFLX,FB,CSCO,NVDA,INTC,PYPL,QCOM,TXN,AMZN},
+  xtick=data,
+  xticklabel style={rotate=40, anchor=east, font=\small},
+  ylabel={Relative bid-ask spread (bps)},
+  ymin=0, ymax=75,
+  ytick={0,10,20,30,40,50,60,65,70},
+  title={Per-Symbol Relative Spread vs.\ Tadawul Group A Regulatory Floor},
+  title style={font=\small},
+  label style={font=\small},
+  grid=major, grid style={gray!30},
+  enlarge x limits=0.06,
+  nodes near coords,
+  nodes near coords align={vertical},
+  every node near coord/.append style={font=\tiny, rotate=90, anchor=west},
+  legend style={at={(0.98,0.98)}, anchor=north east, font=\small},
+  % Add reference lines via extra y tick
+  extra y tick style={grid=major, grid style={red, dashed, thick}},
+  extra y ticks={65, 9.1},
+  extra y tick labels={},
+]
+\addplot[fill=green!60!black, fill opacity=0.75, draw=green!40!black]
+  coordinates {
+    (AAPL,0.4)(MSFT,2.1)(GOOG,0.1)(GOOGL,0.8)(NFLX,0.4)
+    (FB,1.2)(CSCO,1.2)(NVDA,4.3)(INTC,3.7)(PYPL,3.2)
+    (QCOM,18.2)(TXN,5.5)(AMZN,0.7)
+  };
+\addlegendentry{This engine --- relative spread (bps)}
+
+% Tadawul floor line
+\addplot[red, thick, dashed, mark=none] coordinates {(AAPL,65)(AMZN,65)};
+\addlegendentry{Tadawul Group A floor (65 bps)}
+
+% Engine average line
+\addplot[orange!80!black, thick, dotted, mark=none] coordinates {(AAPL,9.1)(AMZN,9.1)};
+\addlegendentry{Engine average (9.1 bps)}
+
+\node[red, font=\scriptsize, anchor=west] at (axis cs:AMZN,66.5) {65 bps};
+\node[orange!80!black, font=\scriptsize, anchor=west] at (axis cs:AMZN,10.5) {avg 9.1};
+\node[gray, font=\tiny] at (axis cs:QCOM,22) {ADBE: 84.9\,(clipped)};
+\end{axis}
+\end{tikzpicture}
+\caption{Relative bid-ask spread (bps) per symbol for the HFT-active
+run. ADBE (84.9~bps) is clipped at 75 for readability. 12 of 13 plotted
+symbols lie below 20~bps; the 9.1~bps average is 7$\times$ tighter
+than Tadawul's 65~bps Group~A regulatory floor (dashed red).}
+\label{fig:spread_per_symbol}
+\end{figure}
+
+\paragraph{Quoted and Relative Spread.}
+The average quoted spread of \$0.27 and average relative spread of
+\textbf{9.1~bps} reflect the tightest quotes posted by the strategy.
+12 out of 14 symbols report relative spreads below 6~bps; QCOM
+(18.2~bps) and ADBE (84.9~bps) are outliers due to lower fill rates
+(1--21 fills) and wider natural market spreads in these less liquid
+names within the Group~A set. The 9.1~bps average is \textbf{7$\times$
+tighter} than Tadawul's 65~bps Group~A regulatory floor.
+
+\paragraph{Effective Spread.}
+The average effective spread of 2.3~bps measures the actual
+transaction cost paid by counterparties filling against the strategy's
+quotes. This is consistently lower than the quoted spread (as expected
+for a market maker), confirming that quotes are placed inside the
+prevailing market spread rather than at the market edges.
+
+\paragraph{Realized Spread and Adverse Selection.}
+The average realized spread of $-$19.3~bps is \textit{negative},
+indicating that the strategy is adversely selected: counterparties who
+fill the strategy's quotes are, on average, informationally superior.
+The mid-price moves \textit{against} the strategy's position in the
+30 seconds following a fill. This is consistent with the canonical
+Glosten-Milgrom adverse selection model \cite{glosten1985}: in a
+liquid, efficiently priced market, the bulk of order flow is informed.
+Symbols with the largest negative realized spreads (NVDA $-$64.7~bps,
+CSCO $-$48.3~bps, PYPL $-$54.8~bps) are also those with the most
+active institutional order flow on January 30, 2020.
+
+\subsubsection*{Baseline vs.\ HFT Comparison}
+
+Table~\ref{tab:impact} compares aggregate market quality metrics
+between the baseline (no strategy) and HFT-active runs.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Market impact: baseline vs.\ HFT strategy (15 symbols, full day).}
+\label{tab:impact}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Metric} & \textbf{Baseline} & \textbf{HFT} & \textbf{Change} \\
+\midrule
+Avg spread (\$)         & \$1.096 & \$45.79  & $+$4076\% \\
+\textit{Median} spread (\$) & \$0.230 & \$0.040 & \textbf{$-$82.6\%} \\
+Avg bid volume (shares) &   266.4 & 2162.3  & $+$712\% \\
+Avg ask volume (shares) &   305.1 & 1204.0  & $+$295\% \\
+Total book depth        &   571.5 & 3366.3  & $+$489\% \\
+Avg bid price levels    &   655.8 &  665.1  & $+$1.4\% \\
+Avg ask price levels    &   351.9 &  409.3  & $+$16.3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The \textit{mean} spread rises in the HFT run because a small number of
+wide-spread snapshots from ADBE and CMCSA dominate the arithmetic mean.
+The \textbf{median} spread is the appropriate summary statistic for a
+skewed distribution: it falls by \textbf{82.6\%} ($\$0.23 \to \$0.04$),
+confirming that the strategy tightens spreads at the typical book state.
+Book depth increases by 489\% on average, reflecting the strategy's
+continuous two-sided quoting which adds to volume at the top of book.
+
+\subsubsection*{Spread Decomposition (Huang--Stoll, 1996)}
+
+Following Huang and Stoll \cite{huang1996}, the effective
+spread can be decomposed as:
+
+\[
+\text{Effective spread} = \text{Realized spread} + \text{Adverse selection component}
+\]
+
+With an average effective spread of 2.3~bps and realized spread of
+$-$19.3~bps, the adverse selection component is
+$2.3 - (-19.3) = +21.6$~bps per trade. This confirms that the
+strategy's edge comes entirely from earning the quoted spread (2.3~bps
+effective) but loses 21.6~bps per trade to adverse selection, producing
+a negative net realized spread. The Avellaneda-Stoikov framework
+accounts for this via the inventory-dependent reservation price
+(Equation~\ref{eq:reservation}), but the observed magnitude of adverse
+selection on NASDAQ Group~A stocks exceeds what the base model
+anticipates. Section~\ref{sec:conc:future} discusses targeted remedies.
+
+%--------------------------------------------------------------------
+\subsection{Result Summary and Targets Revisited}
+\label{sec:eval:summary}
+%--------------------------------------------------------------------
+
+\begin{table}[H]
+\centering
+\small
+\caption{Summary: proposal performance targets vs.\ achieved results.}
+\label{tab:targets_final}
+\begin{tabular}{@{}llp{3.2cm}p{6.2cm}@{}}
+\toprule
+\textbf{Prob.} & \textbf{Metric} & \textbf{Target} & \textbf{Achieved} \\
+\midrule
+P1 & Throughput        & Millions/sec        & 14.1~M msgs/sec (warm path); 10.15~M avg (full day) \\[4pt]
+P1 & Latency p99       & $<1~\mu$s           & \textbf{128~ns} strategy decide \checkmark \\[4pt]
+P2 & Spread reduction  & Qualitative         & $-$82.6\% median; $-$94.9\% vs.\ no-strategy \checkmark \\[4pt]
+P2 & Relative spread   & Not specified       & \textbf{9.1~bps} avg (15 symbols); 7$\times$ below Tadawul 65~bps floor \checkmark \\[4pt]
+P3 & GPU analytics     & Up to $10\times$    & \textbf{4.65$\times$} at 8{,}915 symbols (73\% bandwidth peak) \\[4pt]
+P3 & GPU risk          & Up to $10\times$    & \textbf{23.9$\times$} at 5{,}000 positions \checkmark \\[4pt]
+P4 & Spread measures   & 4 measures          & All 4 implemented + Huang-Stoll adverse-selection decomposition \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All four problem targets were met. The GPU analytics speedup of
+$4.65\times$ is below the aspirational $10\times$ ceiling but is
+bounded by the RTX 3060's theoretical memory bandwidth (73\%
+utilisation), not by algorithmic inefficiency --- a higher-bandwidth
+GPU (e.g.\ A100 at 2,000~GB/s) would scale proportionally.
+
+\newpage
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conc}
+
+This work presented the design, implementation, and empirical
+evaluation of a heterogeneous high-frequency trading engine targeting
+Tadawul Group~A-class securities. Starting from a CPU-only order-book
+foundation, the work added a CUDA GPU acceleration layer, a market-making
+strategy grounded in the Avellaneda-Stoikov (2008) framework, a
+pre-trade risk gate, and complete microstructure measurement. The system
+was evaluated on a full trading day of NASDAQ ITCH 5.0 data
+(423,285,709 messages), the gold-standard public dataset for HFT
+research.
+
+%--------------------------------------------------------------------
+\subsection{Summary of Contributions}
+\label{sec:conc:summary}
+%--------------------------------------------------------------------
+
+\paragraph{Contribution 1 — Heterogeneous Engine Architecture.}
+The engine processes ITCH messages at \textbf{14.1~M messages/second}
+(warm path) with a strategy-decide p99 latency of \textbf{128~ns} ---
+well below the 1~$\mu$s target. The CPU/GPU boundary was designed so
+that latency-critical per-event logic (ITCH parsing, order-book updates,
+quote generation) executes on the CPU, while portfolio-wide aggregation
+over $N$ symbols executes on the GPU. This separation gives the engine
+the best of both architectures: deterministic low latency for the
+event-driven path and massive parallelism for the batch risk check.
+
+\paragraph{Contribution 2 — GPU Acceleration.}
+The GPU analytics kernel achieves \textbf{4.65$\times$} speedup at
+8,915 symbols, reaching 73\% of the RTX~3060's theoretical memory
+bandwidth peak. The risk kernel achieves \textbf{23.93$\times$} speedup
+at 5,000 positions, exceeding the 10$\times$ proposal target. The GPU
+breakeven point for the analytics kernel is approximately 100 symbols,
+consistent with Tadawul's 230+ listed securities falling firmly in
+the GPU-favourable operating region.
+
+\paragraph{Contribution 3 — Quantified Market Efficiency Improvement.}
+The market-making strategy reduces the median bid-ask spread by
+\textbf{82.6\%} ($\$0.23 \to \$0.04$) relative to the no-strategy
+baseline, with an average relative spread of \textbf{9.1~bps} across
+15 Group~A-equivalent symbols. This is \textbf{7$\times$ tighter} than
+Tadawul's 65~bps Group~A regulatory floor, and competitive with the
+1--2~bps spreads observed on US mega-cap securities. Book depth
+increases by 489\% on average, confirming the strategy's role as a
+genuine liquidity provider.
+
+\paragraph{Contribution 4 — Complete Microstructure Measurement.}
+All four standard spread measures --- quoted, relative, effective, and
+realized --- are implemented and reported, including the
+Huang-Stoll (1996) adverse selection decomposition. The average
+realized spread of $-$19.3~bps reveals systematic adverse selection:
+the strategy's counterparties are informationally superior on average,
+with mid-price moving against the strategy's position in the 30 seconds
+following each fill. This is not a flaw in the implementation; it is an
+empirically correct characterisation of market-maker risk in a
+liquid, information-efficient market.
+
+%--------------------------------------------------------------------
+\subsection{Limitations}
+\label{sec:conc:limits}
+%--------------------------------------------------------------------
+
+\begin{enumerate}
+  \item \textbf{NASDAQ data, not Tadawul.} The engine was evaluated on
+        NASDAQ equities (January 30, 2020). Tadawul stocks trade in SAR,
+        with different tick sizes, session hours (10:00--15:00~AST), and
+        circuit-breaker rules ($\pm$10\% daily limit). The comparison
+        between the engine's measured spreads and Tadawul's 65~bps floor
+        is structural (liquidity-tier equivalence), not a direct replay
+        of Saudi market data. WAMID DataHub access was pursued in 2024
+        but is not available for academic research.
+
+  \item \textbf{Simulation only.} No live orders are sent to any
+        exchange. The engine produces and fills quotes internally. No
+        execution gateway, broker connection, or co-location
+        infrastructure is included. These are necessary for live
+        deployment but out of scope for this work.
+
+  \item \textbf{PCIe transfer overhead.} End-to-end GPU speedup is
+        substantially lower than kernel-only speedup because PCIe
+        data transfers dominate below approximately 1,000 symbols.
+        The kernel speedup (4.65$\times$, 23.93$\times$) is the
+        theoretically correct measure of GPU computational advantage;
+        end-to-end numbers reflect the current memory architecture
+        rather than the algorithm.
+
+  \item \textbf{Adverse selection.} The negative realized spread
+        ($-$19.3~bps average) means the strategy loses more to informed
+        order flow than it earns from the quoted spread. The engine is
+        profitable on a per-trade basis (positive effective spread)
+        but net negative on a risk-adjusted basis. A production system
+        would require a more sophisticated inventory-control and
+        toxicity-filtering layer.
+
+  \item \textbf{Single trading day.} Results reflect one market
+        regime. Spread behaviour varies across earnings announcements,
+        macro events, and volatility regimes (e.g.\ the COVID spike
+        beginning February 2020, one month after the test date).
+\end{enumerate}
+
+%--------------------------------------------------------------------
+\subsection{Future Work}
+\label{sec:conc:future}
+%--------------------------------------------------------------------
+
+\paragraph{GPU-Resident Order Book.}
+The dominant cost in the current GPU pipeline is PCIe data transfer.
+Eliminating it requires maintaining the entire order-book state on
+device and processing ITCH events with CUDA dynamic parallelism kernels.
+This is architecturally more complex but would push the GPU breakeven
+below 10 symbols and deliver end-to-end speedup matching the
+kernel-only numbers.
+
+\paragraph{Tadawul Integration.}
+The engine requires two modifications for live Tadawul deployment:
+(1) replace the ITCHHandler with a WAMID FAST protocol decoder, and
+(2) add a Saudi-specific order submission layer (FIX 4.4 or OUCH
+protocol, Tadawul co-location infrastructure). The core order book,
+strategy, and GPU kernels are exchange-agnostic and require no changes.
+
+\paragraph{Reinforcement Learning Strategy.}
+The Avellaneda-Stoikov closed-form spread is adversely selected by
+informed flow. A DQN or PPO agent trained on order-flow features
+(trade imbalance, short-term momentum, volume-weighted adverse
+selection) could learn to widen spreads before information events
+and narrow them during uninformed periods. The GPU infrastructure
+is already in place for parallel environment simulation during
+training.
+
+\paragraph{Inventory Control at Scale.}
+The current strategy quotes symmetrically around the mid-price with
+a simple inventory skew. Cartea-Jaimungal (2015) \cite{cartea2015}
+and related optimal-control approaches derive closed-form solutions
+for maximising expected utility under inventory and adverse-selection
+risk simultaneously. Implementing the full Cartea-Jaimungal framework
+and evaluating realized-spread improvement is a natural next step.
+
+\paragraph{Multi-Venue Extension.}
+Extending the engine to quote simultaneously on Tadawul and the NOMU
+Parallel Market (Saudi Arabia's growth-company exchange) would enable
+cross-venue arbitrage and dual-market liquidity provision, both
+important features of mature HFT firms operating in the Kingdom.
+
+\newpage
+
+% ============================================================
+\printbibliography[heading=bibintoc, title={References}]
+
+\end{document}

@@ -265,6 +265,18 @@ public:
     }
 
     /**
+     * Get last known mid-price for a symbol (used for effective spread logging)
+     */
+    uint64_t get_mid_price(uint32_t symbol_id) const {
+        auto it = last_mid_prices_.find(symbol_id);
+        return (it != last_mid_prices_.end()) ? it->second : 0;
+    }
+
+    const std::unordered_map<uint32_t, uint64_t>& get_mid_prices() const {
+        return last_mid_prices_;
+    }
+
+    /**
      * Get current position for a symbol
      */
     int64_t get_position(uint32_t symbol_id) const {

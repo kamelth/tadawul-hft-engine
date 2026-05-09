@@ -202,6 +202,13 @@ public:
         positions_.clear();
     }
 
+    /**
+     * Read-only access to all positions (for risk manager iteration)
+     */
+    const std::unordered_map<uint32_t, Position>& positions() const {
+        return positions_;
+    }
+
 private:
     std::unordered_map<uint32_t, Position> positions_;
 };

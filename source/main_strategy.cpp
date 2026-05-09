@@ -11,6 +11,7 @@
 #include "trader/strategy/signal_table.h"
 #include "trader/performance/metrics.h"
 #include "trader/performance/market_impact.h"
+#include "trader/risk/risk_manager.h"
 
 /**
  * TradeLogger — writes one CSV row per strategy fill.
@@ -23,7 +24,7 @@ public:
     explicit TradeLogger(const std::string& path) : file_(path) {
         if (file_.is_open()) {
             file_ << "timestamp_ns,symbol,side,fill_price,fill_qty,"
-                     "position_after,realized_pnl\n";
+                     "position_after,realized_pnl,mid_at_fill,effective_spread_bps\n";
         } else {
             std::cerr << "Warning: could not open trade log: " << path << "\n";
         }
@@ -33,11 +34,21 @@ public:
 
     void log(uint64_t ts_ns, const std::string& symbol, const char* side,
              uint64_t fill_price, uint64_t fill_qty,
-             int64_t position_after, int64_t realized_pnl) {
+             int64_t position_after, int64_t realized_pnl,
+             uint64_t mid_at_fill) {
         if (!file_.is_open()) return;
+
+        // Effective spread = 2 × |fill_price - mid| / mid × 10000  (basis points)
+        double eff_bps = (mid_at_fill > 0)
+            ? (2.0 * std::abs(static_cast<int64_t>(fill_price)
+                              - static_cast<int64_t>(mid_at_fill))
+               * 10000.0) / mid_at_fill
+            : 0.0;
+
         file_ << ts_ns << ',' << symbol << ',' << side << ','
               << fill_price << ',' << fill_qty << ','
-              << position_after << ',' << realized_pnl << '\n';
+              << position_after << ',' << realized_pnl << ','
+              << mid_at_fill << ',' << eff_bps << '\n';
     }
 
     void flush() { if (file_.is_open()) file_.flush(); }
@@ -51,6 +62,7 @@ using namespace Trader::Providers::NASDAQ;
 using namespace Trader::Matching;
 using namespace Trader::Strategy;
 using namespace Trader::Performance;
+using namespace Trader::Risk;
 
 /**
  * Strategy-Aware Market Handler
@@ -67,6 +79,7 @@ public:
         , market_maker_ptr_(nullptr)
         , trade_logger_(nullptr)
         , signal_table_(nullptr)
+        , risk_manager_(nullptr)
         , order_count_(0)
         , execution_count_(0)
         , strategy_fills_(0)
@@ -76,6 +89,7 @@ public:
     void set_market_maker(MarketMaker* mm) { market_maker_ptr_ = mm; }
     void set_trade_logger(TradeLogger* logger) { trade_logger_ = logger; }
     void set_signal_table(Strategy::SignalTable* st) { signal_table_ = st; }
+    void set_risk_manager(RiskManager* rm) { risk_manager_ = rm; }
 
     void on_order_added(const Order* order) override {
         (void)order;
@@ -122,9 +136,17 @@ public:
                     const char* side_str =
                         (side == Matching::OrderSide::Buy) ? "BUY" : "SELL";
 
+                    uint64_t mid_at_fill = market_maker_ptr_->get_mid_price(sym_id);
                     trade_logger_->log(execution.timestamp.nanoseconds(), sym_name, side_str,
                                        execution.execution_price, execution.execution_quantity,
-                                       pos_after, realized_pnl);
+                                       pos_after, realized_pnl, mid_at_fill);
+                }
+
+                // Refresh portfolio risk after each fill
+                if (risk_manager_) {
+                    risk_manager_->refresh_portfolio(
+                        market_maker_ptr_->get_position_manager(),
+                        market_maker_ptr_->get_mid_prices());
                 }
             }
         }
@@ -193,6 +215,7 @@ private:
     MarketMaker*           market_maker_ptr_;
     TradeLogger*           trade_logger_;
     Strategy::SignalTable* signal_table_;
+    RiskManager*           risk_manager_;
     uint64_t order_count_;
     uint64_t execution_count_;
     uint64_t strategy_fills_;
@@ -210,12 +233,52 @@ private:
 
         // Get pending orders from strategy
         auto orders = strategy_->get_pending_orders();
+        if (orders.empty()) return;
 
-        for (const auto& order : orders) {
-            // Validate order
-            if (order.quantity == 0 || order.price == 0) {
-                continue;
+        // ── Portfolio-level gate ─────────────────────────────────────────────
+        // If total exposure > limit OR total P&L < stop-loss, block all quotes.
+        if (risk_manager_ && !risk_manager_->is_portfolio_ok()) {
+            return;
+        }
+
+        // ── Batch order validation ───────────────────────────────────────────
+        // Build per-order entries and per-symbol context for risk validation.
+        std::vector<bool> allowed(orders.size(), true);
+        if (risk_manager_ && market_maker_ptr_) {
+            std::vector<RiskManager::OrderEntry> entries;
+            entries.reserve(orders.size());
+            std::unordered_map<uint32_t, RiskManager::SymbolContext> ctx;
+
+            for (const auto& order : orders) {
+                entries.push_back({
+                    order.symbol_id,
+                    (order.side == Matching::OrderSide::Buy) ? 0u : 1u,
+                    order.price,
+                    order.quantity
+                });
+                if (ctx.find(order.symbol_id) == ctx.end()) {
+                    uint64_t mid = market_maker_ptr_->get_mid_price(order.symbol_id);
+                    uint64_t bid = 0, ask = 0;
+                    const OrderBook* book = market_manager_.get_order_book(order.symbol_id);
+                    if (book) {
+                        OrderBookStats bs = book->get_stats();
+                        bid = bs.best_bid_price;
+                        ask = bs.best_ask_price;
+                    }
+                    ctx[order.symbol_id] = {
+                        bid, ask, mid,
+                        market_maker_ptr_->get_position(order.symbol_id)
+                    };
+                }
             }
+            allowed = risk_manager_->validate_batch(entries, ctx);
+        }
+
+        for (size_t oi = 0; oi < orders.size(); ++oi) {
+            const auto& order = orders[oi];
+
+            if (order.quantity == 0 || order.price == 0) continue;
+            if (!allowed[oi]) continue;
 
             metrics_.strategy_quotes.record();
 
@@ -270,9 +333,10 @@ private:
                     const char* side_str =
                         (order.side == Matching::OrderSide::Buy) ? "BUY" : "SELL";
 
+                    uint64_t mid_at_fill = market_maker_ptr_->get_mid_price(order.symbol_id);
                     trade_logger_->log(order.timestamp.nanoseconds(), sym_name, side_str,
                                        exec.execution_price, exec.execution_quantity,
-                                       pos_after, realized_pnl);
+                                       pos_after, realized_pnl, mid_at_fill);
                 }
             }
 
@@ -308,6 +372,8 @@ int main(int argc, char* argv[]) {
     std::string trade_log_path;  // empty = disable trade log
     bool use_adaptive = false;        // enable v2 adaptive spread + flow skew
     bool use_adaptive_vol_only = false;  // enable only volatility-adaptive spread (no flow skew)
+    RiskManager::Mode risk_mode = RiskManager::Mode::None;
+    RiskManager::Limits risk_limits;
 
     // Parse arguments
     for (int i = 2; i < argc; ++i) {
@@ -325,6 +391,16 @@ int main(int argc, char* argv[]) {
             use_adaptive = true;
         } else if (strcmp(argv[i], "--adaptive-vol") == 0) {
             use_adaptive_vol_only = true;
+        } else if (strcmp(argv[i], "--risk-mode") == 0 && i + 1 < argc) {
+            std::string rm = argv[++i];
+            if      (rm == "cpu") risk_mode = RiskManager::Mode::CPU;
+            else if (rm == "gpu") risk_mode = RiskManager::Mode::GPU;
+            else if (rm == "none") risk_mode = RiskManager::Mode::None;
+            else { std::cerr << "Unknown --risk-mode: " << rm << "\n"; return 1; }
+        } else if (strcmp(argv[i], "--max-exposure") == 0 && i + 1 < argc) {
+            risk_limits.max_gross_exposure = std::stoll(argv[++i]) * 10000LL; // convert $ to $0.0001
+        } else if (strcmp(argv[i], "--stop-loss") == 0 && i + 1 < argc) {
+            risk_limits.stop_loss_threshold = std::stoll(argv[++i]) * 10000LL;
         } else {
             filter_symbols.push_back(argv[i]);
         }
@@ -384,6 +460,25 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Create risk manager
+    RiskManager* risk_manager = nullptr;
+    if (risk_mode != RiskManager::Mode::None) {
+        if (use_strategy) {
+            risk_limits.max_position = 1000; // sync with MarketMaker params
+            risk_manager = new RiskManager(risk_mode, risk_limits);
+            const char* rm_str = (risk_mode == RiskManager::Mode::GPU) ? "GPU" : "CPU";
+            std::cout << "Risk Management: " << rm_str << " mode\n";
+            std::cout << "  Max gross exposure: $"
+                      << (risk_limits.max_gross_exposure / 10000.0) << "\n";
+            std::cout << "  Stop-loss:          $"
+                      << (risk_limits.stop_loss_threshold / 10000.0) << "\n";
+            std::cout << "  Max position/sym:   " << risk_limits.max_position << " shares\n";
+            std::cout << "  Price band:         " << risk_limits.price_band_bps << " bps\n";
+        }
+    } else {
+        std::cout << "Risk Management: disabled (use --risk-mode cpu|gpu to enable)\n";
+    }
+
     // Create market impact collector (sample every 10s of ITCH time)
     MarketImpactCollector impact_collector(market_manager, 10'000'000'000ULL);
 
@@ -420,6 +515,9 @@ int main(int argc, char* argv[]) {
         strategy_handler.set_trade_logger(trade_logger);
     }
     strategy_handler.set_signal_table(&signal_table);
+    if (risk_manager) {
+        strategy_handler.set_risk_manager(risk_manager);
+    }
     market_manager.set_handler(&strategy_handler);
 
     // Create ITCH handler
@@ -603,6 +701,12 @@ int main(int argc, char* argv[]) {
     metrics.write_artifacts(results_dir);
     std::cout << "Wrote " << results_dir
               << "/latency_*.csv and throughput_*.csv\n";
+
+    // ---- Risk management report ----
+    if (risk_manager) {
+        risk_manager->write_report(std::cout);
+        delete risk_manager;
+    }
 
     // Cleanup
     if (trade_logger) {
